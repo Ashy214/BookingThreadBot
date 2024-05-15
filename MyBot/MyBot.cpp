@@ -20,7 +20,7 @@ std::shared_ptr<std::map<int, bool>> g_bookedTables = std::make_shared<std::map<
 // Allow booking for more than 2 people
 // Image of table booking to allow user to select from image
 // BookTable currently only handles slash commands. Would be useful to allow for someone to book with freeform input, perhaps from a ? command
-// BookingInfo object that contains user1, user2 and system. Table num is still as above for g_bookedTables
+// Create a bookingThreadTester that writes messages into discord to do the book/remove functions etc
 
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 void setupBookedTables()
