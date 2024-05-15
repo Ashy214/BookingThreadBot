@@ -142,7 +142,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>DPP_WIN_TEMPLATE;DPP_CORO;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>DPP_WIN_TEMPLATE;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
@@ -187,9 +187,11 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="BookingInfo.cpp" />
     <ClCompile Include="MyBot.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="BookingInfo.h" />
     <ClInclude Include="dependencies\include\dpp-10.0\dpp\appcommand.h" />
     <ClInclude Include="dependencies\include\dpp-10.0\dpp\application.h" />
     <ClInclude Include="dependencies\include\dpp-10.0\dpp\auditlog.h" />
