@@ -12,6 +12,11 @@ class BookingInfo
         std::shared_ptr<std::map<std::string, std::vector<int>>> tableSystem;
 
     public:
+        /// <summary>
+        /// Constructor
+        /// </summary>
+        BookingInfo();
+
 	    /// <summary>
         /// Constructor
         /// </summary>
@@ -24,5 +29,9 @@ class BookingInfo
 
         bool isBooked();
         bool isSuitable(int p_tableNum);
+
+        inline std::string getUser1() { return _user1; }
+        inline std::string getUser2() { return _user2; }
+        inline std::string getSystem() { return _system; }
 };
 

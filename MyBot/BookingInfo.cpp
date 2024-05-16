@@ -4,6 +4,12 @@
 /// <summary>
 /// Constructor
 /// </summary>
+BookingInfo::BookingInfo()
+{
+}
+/// <summary>
+/// Constructor
+/// </summary>
 BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system)
 {
     _user1 = p_user1;
