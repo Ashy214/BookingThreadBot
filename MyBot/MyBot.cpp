@@ -159,6 +159,10 @@ int bookTable(BookingInfo &p_bookInfo, int p_tableNum)
 		it->second = p_bookInfo;
 		writeBookedTable(it);
 		//Mutex unlock
+		if (!p_bookInfo.isSuitable(p_tableNum))
+		{
+			return -5;
+		}
 		return 0;
 	}
 	//int rc = it->second.isBooked() ? -1 : writeBookedTable(it);
@@ -205,6 +209,8 @@ std::string formatError(int p_rc)
 			return "No game system specified";
 		case -4:
 			return "Table already booked";
+		case -5:
+			return "Successfully booked, but table is not recommended for game system selected";
 		default:
 			return "Error running command. Please contact @Windsurfer";
 	}
