@@ -4,27 +4,28 @@
 #include <fstream>
 #include "BookingInfo.h"
 
-/* Be sure to place your token in the line below.
- * Follow steps here to get a token:
- * https://dpp.dev/creating-a-bot-application.html
- * When you invite the bot, be sure to invite it with the 
- * scopes 'bot' and 'applications.commands', e.g.
- * https://discord.com/oauth2/authorize?client_id=940762342495518720&scope=bot+applications.commands&permissions=139586816064
- */
-//const std::string    BOT_TOKEN;
 const long long int GUILD_ID = 635182631754924032;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 
 //ToDo::
 // List tables just for that specific game system
-// Warning if table selected isn't suitable for that game system
 // Allow booking for more than 2 people
 // Image of table booking to allow user to select from image
 // BookTable currently only handles slash commands. Would be useful to allow for someone to book with freeform input, perhaps from a ? command
 // Create a bookingThreadTester that writes messages into discord to do the book/remove functions etc
+//Report function - The file stored on disk with table bookings will contain snowflake ID's. Not human readable! So will need a function that can go through a bookingFile and convert to usernames.
+
+
+//We can use p_bot.guild_get_member to get the member object from snowflake. We can then get mention@ and nickname for them. For string we could use guild_search_members?
+/*
+*	We take strings as users. When we create BookingInfo object, we guild_search_members to find snowflake if possible and store in obj. When we output successful booking,
+*	if !snowflake.empty() then trigger mention. If it is then output string
+*	When we write to file, always use string.
+*/
+
 
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
-void setupBookedTables()
+void setupBookedTables(dpp::cluster &p_bot)
 {
 	BookingInfo emptyBooking;
 	//Populate g_bookedTables
@@ -49,17 +50,53 @@ void setupBookedTables()
 				bookingLine.push_back(token);
 			}
 			//We should now have bookingLine containing user1, user2, table, system
-			BookingInfo currentBooking(bookingLine[0], bookingLine[1], bookingLine[3]);
-			g_bookedTables->at(std::stoi(bookingLine[2])) = currentBooking;
+			BookingInfo currentBooking(bookingLine[0], bookingLine[1], bookingLine[3], p_bot);
+			int tableNum = std::stoi(bookingLine[2]);
+			g_bookedTables->at(tableNum) = currentBooking;
+			populateGuildMembers(currentBooking, p_bot, tableNum);
 		}
 		bookingFile.close();
 	}
 }
 
+void populateGuildMembers(BookingInfo &p_bookInfo, dpp::cluster &p_bot, int p_tableNum)
+{
+	//Potential race condition where these callbacks aren't hit before something checks the object itself??
+	p_bot.guild_search_members(GUILD_ID, p_bookInfo.getUser1String(), 1, [&p_bot, p_tableNum](const dpp::confirmation_callback_t& callback)
+		{
+			if (callback.is_error()) { /* catching an error to log it */
+				p_bot.log(dpp::loglevel::ll_error, callback.get_error().message);
+				return;
+			}
+			dpp::guild_member_map guildMap = callback.get<dpp::guild_member_map>();
+			if (!guildMap.empty())
+			{
+				g_bookedTables->at(p_tableNum).set_user1Member(guildMap.begin()->second);
+				//_user1Member = std::make_shared<dpp::guild_member>(testMem); //Just return first guild member that matches.
+					//&guildMap.begin()->second; //Just return first guild member that matches.
+			}
+		});
+	p_bot.guild_search_members(GUILD_ID, p_bookInfo.getUser2String(), 1, [&p_bot, p_tableNum](const dpp::confirmation_callback_t& callback)
+		{
+			if (callback.is_error()) { /* catching an error to log it */
+				p_bot.log(dpp::loglevel::ll_error, callback.get_error().message);
+				return;
+			}
+			dpp::guild_member_map guildMap = callback.get<dpp::guild_member_map>();
+			if (!guildMap.empty())
+			{
+				g_bookedTables->at(p_tableNum).set_user2Member(guildMap.begin()->second);
+				//_user1Member = std::make_shared<dpp::guild_member>(testMem); //Just return first guild member that matches.
+					//&guildMap.begin()->second; //Just return first guild member that matches.
+			}
+		});
+}
+
+//This will need to be modified to somehow work out when we have a userID and to do a @mention
 std::string formatBookInfo(BookingInfo &p_bookInfo, int p_tableNum)
 {
-	std::string user1 = p_bookInfo.getUser1();
-	std::string user2 = p_bookInfo.getUser2();
+	std::string user1 = p_bookInfo.getUser1String();
+	std::string user2 = p_bookInfo.getUser2String();
 	std::string system = p_bookInfo.getSystem();
 	return user1 + ',' + user2 + ',' + std::to_string(p_tableNum) + ',' + system + '\n';
 }
@@ -79,7 +116,7 @@ int dumpTableBookings()
 	}
 	else
 	{
-		return -4;
+		return -6;
 	}
 	return 0;
 }
@@ -96,7 +133,7 @@ int writeBookedTable(std::map<int, BookingInfo>::iterator &p_it)
 	}
 	else
 	{
-		return -4;
+		return -6;
 	}
 	return 0;
 }
@@ -120,10 +157,14 @@ int setupCommands(dpp::cluster &p_bot)
 		//setup command options for each
 		if (it.first == "book")
 		{
-			newCommand.add_option( dpp::command_option(dpp::co_string, "user1", "User 1 to book for", false) );
-			newCommand.add_option( dpp::command_option(dpp::co_string, "user2", "User 2 to book for", false) );
+			//newCommand.add_option( dpp::command_option(dpp::co_user, "user1", "User 1 to book for", false) );
+			//newCommand.add_option( dpp::command_option(dpp::co_user, "user2", "User 2 to book for", false) );
+			newCommand.add_option(dpp::command_option(dpp::co_string, "user1", "User 1 to book for", false));
+			newCommand.add_option(dpp::command_option(dpp::co_string, "user2", "User 2 to book for", false));
 			newCommand.add_option( dpp::command_option(dpp::co_integer,"table",	"Table number", false) );
 			newCommand.add_option( dpp::command_option(dpp::co_string, "system", "Game system e.g. 40k/AoS/Kill Team", false) );
+			newCommand.add_option(dpp::command_option(dpp::co_user, "userdiscord1", "Optional User 1 to book for. guest name", false) );
+			//newCommand.add_option(dpp::command_option(dpp::co_string, "optionalguest2", "Optional User 2 to book for. guest name", false));
 		}
 		else if (it.first == "remove")
 		{
@@ -169,15 +210,18 @@ int bookTable(BookingInfo &p_bookInfo, int p_tableNum)
 	return -4;
 }
 
-int bookTable(const dpp::slashcommand_t &event)
+int bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 {
 	//Should also handle putting an image of the tables and letting user pick from image?
+	//dpp::snowflake user1 = std::get<dpp::snowflake>(event.get_parameter("user1"));
+	//dpp::snowflake user2 = std::get<dpp::snowflake>(event.get_parameter("user2"));
 	std::string user1 = std::get<std::string>(event.get_parameter("user1"));
 	std::string user2 = std::get<std::string>(event.get_parameter("user2"));
 	std::string system = std::get<std::string>(event.get_parameter("system"));
 	int tableNum = static_cast<int>(std::get<int64_t>(event.get_parameter("table")));
-
+	//dpp::snowflake userId = std::get<dpp::snowflake>(event.get_parameter("userdiscord1"));
 	//Parameter checking for errors
+	//dpp::guild_member resolved_member = event.command.get_resolved_member(userId);
 	if (user1.empty() && user2.empty())
 	{
 		return -1;
@@ -191,10 +235,20 @@ int bookTable(const dpp::slashcommand_t &event)
 	{
 		return -3;
 	}
-
+	
 	//Now create bookingInfo object from above parms and call bookTable overload
-	BookingInfo bookInfo(user1, user2, system);
-	return bookTable(bookInfo, tableNum);
+	BookingInfo bookInfo(user1, user2, system, p_bot);
+	int rc = bookTable(bookInfo, tableNum);
+	if(rc == 0
+	|| rc == -5)
+	{
+		//Booking success so format then output booking message
+		//Need to amend this to say if user exists or not!
+		//dpp::message msg(event.command.channel_id, resolved_member.get_mention());
+		dpp::message msg(event.command.channel_id, bookInfo.formatMsg(tableNum));
+		p_bot.message_create(msg);
+	}
+	return rc;
 }
 
 std::string formatError(int p_rc)
@@ -212,7 +266,7 @@ std::string formatError(int p_rc)
 		case -5:
 			return "Successfully booked, but table is not recommended for game system selected";
 		default:
-			return "Error running command. Please contact @Windsurfer";
+			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
 
 }
@@ -239,7 +293,7 @@ int main()
 			{
 				printf("Error setting up initial commands");
 			}
-			setupBookedTables();
+			setupBookedTables(bot);
 		}
 	});
 
@@ -253,10 +307,10 @@ int main()
 			event.reply("Pong!");
 		}
 		else if (cmdValue == "update") {
-			updateMsg = (rc = setupCommands(bot) != 0) ? formatError(rc) : "Successfully updated";
+			updateMsg = ((rc = setupCommands(bot)) != 0) ? formatError(rc) : "Successfully updated";
 		}
 		else if (cmdValue == "book") {
-			updateMsg = (rc = bookTable(event) != 0) ? formatError(rc) : "Successfully booked";
+			updateMsg = ((rc = bookTable(bot, event)) != 0) ? formatError(rc) : "Successfully booked";
 		}
 		else if (cmdValue == "modify")
 		{
