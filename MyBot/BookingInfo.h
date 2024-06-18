@@ -9,9 +9,10 @@ class BookingInfo
     private:
         std::string _user1String;
         std::string _user2String;
-        std::shared_ptr<dpp::guild_member> _user1Member;// = std::shared_ptr<dpp::guild_member>(new dpp::guild_member);
+        std::shared_ptr<dpp::guild_member> _user1Member;
         std::shared_ptr<dpp::guild_member> _user2Member;
         std::string _system;
+        dpp::user _creator;
         std::shared_ptr<std::map<std::string, std::vector<int>>> tableSystem;
         bool _callback1;
         bool _callback2;
@@ -33,13 +34,19 @@ class BookingInfo
         BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot);
 
         /// <summary>
+        /// Constructor with strings
+        /// </summary>
+        BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot, dpp::user &p_creator);
+
+        /// <summary>
         /// Destructor
         /// </summary>
         ~BookingInfo();
 
         bool isBooked();
         bool isSuitable(int p_tableNum);
-        void findUser1(dpp::cluster &p_bot);
+        bool isOwner(dpp::user p_owner);
+        void clearBooking();
         std::string formatMsg(int p_tableNum);
 
         inline std::string getUser1String() { return _user1String; }
@@ -47,10 +54,10 @@ class BookingInfo
         //inline dpp::guild_member getUser1Member() { return *_user1Member; }
         inline dpp::guild_member getUser2Member() { return *_user2Member; }
         inline std::string getSystem() { return _system; }
-        inline void set_user1Member(dpp::guild_member p_guildUser1) { _user1Member = std::make_shared<dpp::guild_member>(p_guildUser1); }
-        inline void set_user2Member(dpp::guild_member p_guildUser2) { _user2Member = std::make_shared<dpp::guild_member>(p_guildUser2); }
-        inline void set_callback1(bool p_callback) { _callback1 = p_callback; }
-        inline void set_callback2(bool p_callback) { _callback2 = p_callback; }
-        inline bool callbackDone() { _callback1 & _callback2; }
+        inline void set_user1Member(dpp::guild_member &p_guildUser1) { _user1Member = std::make_shared<dpp::guild_member>(p_guildUser1); }
+        inline void set_user2Member(dpp::guild_member &p_guildUser2) { _user2Member = std::make_shared<dpp::guild_member>(p_guildUser2); }
+        //inline void set_callback1(bool p_callback) { _callback1 = p_callback; }
+        //inline void set_callback2(bool p_callback) { _callback2 = p_callback; }
+        //inline bool const callbackDone() { return (_callback1 && _callback2); }
 };
 

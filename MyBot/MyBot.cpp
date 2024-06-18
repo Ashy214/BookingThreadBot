@@ -3,8 +3,9 @@
 #include <iostream>
 #include <fstream>
 #include "BookingInfo.h"
+#include <coroutine>
 
-const long long int GUILD_ID = 635182631754924032;
+const dpp::snowflake GUILD_ID = 635182631754924032;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 
 //ToDo::
@@ -14,7 +15,8 @@ std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<st
 // BookTable currently only handles slash commands. Would be useful to allow for someone to book with freeform input, perhaps from a ? command
 // Create a bookingThreadTester that writes messages into discord to do the book/remove functions etc
 //Report function - The file stored on disk with table bookings will contain snowflake ID's. Not human readable! So will need a function that can go through a bookingFile and convert to usernames.
-
+// Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
+// Make it compatible with others posting bookings so we keep up-to-date reference of current bookings
 
 //We can use p_bot.guild_get_member to get the member object from snowflake. We can then get mention@ and nickname for them. For string we could use guild_search_members?
 /*
@@ -22,7 +24,61 @@ std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<st
 *	if !snowflake.empty() then trigger mention. If it is then output string
 *	When we write to file, always use string.
 */
+void handle_eptr(std::exception_ptr eptr) // passing by value is ok
+{
+	try
+	{
+		if (eptr)
+			std::rethrow_exception(eptr);
+	}
+	catch (const std::exception& e)
+	{
+		std::cout << "Caught exception: '" << e.what() << "'\n";
+	}
+}
 
+dpp::task<void> populateGuildMembers(BookingInfo p_bookInfo, dpp::cluster &p_bot, int p_tableNum)
+{
+	dpp::confirmation_callback_t confirmation;
+	dpp::guild_member_map guildMap;
+
+	if (!p_bookInfo.getUser1String().empty())
+	{
+		confirmation = co_await p_bot.co_guild_search_members(GUILD_ID, p_bookInfo.getUser1String(), 1);
+
+		if (confirmation.is_error()) { /* catching an error to log it */
+			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+			co_return;
+		}
+		guildMap = confirmation.get<dpp::guild_member_map>();
+
+		//Use bookInfo object from global var as the one passed into coroutine may have changed state by the time we return
+		if (!guildMap.empty())
+		{
+			g_bookedTables->at(p_tableNum).set_user1Member(guildMap.begin()->second);
+		}
+		printf("callback1 done");
+	}
+	if (!p_bookInfo.getUser2String().empty())
+	{
+		confirmation = co_await p_bot.co_guild_search_members(GUILD_ID, p_bookInfo.getUser2String(), 1);
+
+		if (confirmation.is_error()) { /* catching an error to log it */
+			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+			co_return;
+		}
+		guildMap = confirmation.get<dpp::guild_member_map>();
+
+		//Use bookInfo object from global var as the one passed into coroutine may have changed state by the time we return
+		if (!guildMap.empty())
+		{
+			g_bookedTables->at(p_tableNum).set_user2Member(guildMap.begin()->second);
+		}
+		printf("callback2 done");
+	}
+	
+	co_return;
+}
 
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 void setupBookedTables(dpp::cluster &p_bot)
@@ -57,39 +113,6 @@ void setupBookedTables(dpp::cluster &p_bot)
 		}
 		bookingFile.close();
 	}
-}
-
-void populateGuildMembers(BookingInfo &p_bookInfo, dpp::cluster &p_bot, int p_tableNum)
-{
-	//Potential race condition where these callbacks aren't hit before something checks the object itself??
-	p_bot.guild_search_members(GUILD_ID, p_bookInfo.getUser1String(), 1, [&p_bot, p_tableNum](const dpp::confirmation_callback_t& callback)
-		{
-			if (callback.is_error()) { /* catching an error to log it */
-				p_bot.log(dpp::loglevel::ll_error, callback.get_error().message);
-				return;
-			}
-			dpp::guild_member_map guildMap = callback.get<dpp::guild_member_map>();
-			if (!guildMap.empty())
-			{
-				g_bookedTables->at(p_tableNum).set_user1Member(guildMap.begin()->second);
-				//_user1Member = std::make_shared<dpp::guild_member>(testMem); //Just return first guild member that matches.
-					//&guildMap.begin()->second; //Just return first guild member that matches.
-			}
-		});
-	p_bot.guild_search_members(GUILD_ID, p_bookInfo.getUser2String(), 1, [&p_bot, p_tableNum](const dpp::confirmation_callback_t& callback)
-		{
-			if (callback.is_error()) { /* catching an error to log it */
-				p_bot.log(dpp::loglevel::ll_error, callback.get_error().message);
-				return;
-			}
-			dpp::guild_member_map guildMap = callback.get<dpp::guild_member_map>();
-			if (!guildMap.empty())
-			{
-				g_bookedTables->at(p_tableNum).set_user2Member(guildMap.begin()->second);
-				//_user1Member = std::make_shared<dpp::guild_member>(testMem); //Just return first guild member that matches.
-					//&guildMap.begin()->second; //Just return first guild member that matches.
-			}
-		});
 }
 
 //This will need to be modified to somehow work out when we have a userID and to do a @mention
@@ -168,8 +191,8 @@ int setupCommands(dpp::cluster &p_bot)
 		}
 		else if (it.first == "remove")
 		{
-			newCommand.add_option(dpp::command_option(dpp::co_string, "user",  "User booking to remove", false));
-			newCommand.add_option(dpp::command_option(dpp::co_string, "table", "Table booking to remove", false));
+			//newCommand.add_option(dpp::command_option(dpp::co_string, "user",  "User booking to remove", false));
+			newCommand.add_option(dpp::command_option(dpp::co_integer, "table", "Table booking to remove", false));
 		}
 		else if (it.first == "modify")
 		{
@@ -189,18 +212,18 @@ int setupCommands(dpp::cluster &p_bot)
 	return 0;
 }
 
-//Overload that can handle direct command instead of only slash-command
 //This assumes p_bookInfo has been parsed and is valid (no empty user, game system etc)
 int bookTable(BookingInfo &p_bookInfo, int p_tableNum)
 {
 	auto it = g_bookedTables->find(p_tableNum);
+	//We should never see it == g_bookedTables.end() because we validate tableNum is in range of available tables
 	if (!it->second.isBooked())
 	{
 		//Mutex lock
-		it->second = p_bookInfo;
+		it->second = p_bookInfo; //To fix the need to use g_bookedTables going forward we could create a copy operator to change addresses to be equal
 		writeBookedTable(it);
 		//Mutex unlock
-		if (!p_bookInfo.isSuitable(p_tableNum))
+		if (!it->second.isSuitable(p_tableNum))
 		{
 			return -5;
 		}
@@ -210,7 +233,7 @@ int bookTable(BookingInfo &p_bookInfo, int p_tableNum)
 	return -4;
 }
 
-int bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
+dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 {
 	//Should also handle putting an image of the tables and letting user pick from image?
 	//dpp::snowflake user1 = std::get<dpp::snowflake>(event.get_parameter("user1"));
@@ -218,37 +241,73 @@ int bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	std::string user1 = std::get<std::string>(event.get_parameter("user1"));
 	std::string user2 = std::get<std::string>(event.get_parameter("user2"));
 	std::string system = std::get<std::string>(event.get_parameter("system"));
+	dpp::user creator = event.command.get_issuing_user();
 	int tableNum = static_cast<int>(std::get<int64_t>(event.get_parameter("table")));
 	//dpp::snowflake userId = std::get<dpp::snowflake>(event.get_parameter("userdiscord1"));
 	//Parameter checking for errors
 	//dpp::guild_member resolved_member = event.command.get_resolved_member(userId);
 	if (user1.empty() && user2.empty())
 	{
-		return -1;
+		co_return -1;
 	}
 	else if(tableNum < 1
 		 || tableNum > 13)
 	{
-		return -2;
+		co_return -2;
 	}
 	else if (system.empty())
 	{
-		return -3;
+		co_return -3;
 	}
 	
-	//Now create bookingInfo object from above parms and call bookTable overload
-	BookingInfo bookInfo(user1, user2, system, p_bot);
+	//Now create bookingInfo object from above parms
+	BookingInfo bookInfo(user1, user2, system, p_bot, creator);
 	int rc = bookTable(bookInfo, tableNum);
 	if(rc == 0
 	|| rc == -5)
 	{
 		//Booking success so format then output booking message
-		//Need to amend this to say if user exists or not!
-		//dpp::message msg(event.command.channel_id, resolved_member.get_mention());
-		dpp::message msg(event.command.channel_id, bookInfo.formatMsg(tableNum));
+		co_await populateGuildMembers(bookInfo, p_bot, tableNum);
+		
+		//Use g_bookedTables from here onwards as bookInfo was just for checking booking/passing through data
+		dpp::message msg(event.command.channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
 		p_bot.message_create(msg);
 	}
-	return rc;
+	co_return rc;
+}
+
+//Remove a booking from g_bookedTables and delete the corresponding message posted in the channel
+int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
+{
+	int tableNum = static_cast<int>(std::get<int64_t>(event.get_parameter("table")));
+	dpp::user creator = event.command.get_issuing_user();
+
+	if (tableNum < 1 || tableNum > 13)
+	{
+		return -2;
+	}
+
+	BookingInfo bookInfo = g_bookedTables->at(tableNum);
+	//Check there is a booking to remove, and if so that it is this user that made the booking or the user is an admin
+	if(bookInfo.isBooked())
+	{
+		dpp::permission perms = event.command.get_resolved_permission(creator.id);
+		if(bookInfo.isOwner(creator)
+		|| perms.has(dpp::p_administrator))
+		{
+			//User has permission to remove booking so go ahead
+			bookInfo.clearBooking();
+			return 0;
+		}
+		else
+		{
+			return -7;
+		}
+	}
+	else
+	{
+		return -6;
+	}
 }
 
 std::string formatError(int p_rc)
@@ -265,6 +324,10 @@ std::string formatError(int p_rc)
 			return "Table already booked";
 		case -5:
 			return "Successfully booked, but table is not recommended for game system selected";
+		case -6:
+			return "No booking to remove";
+		case -6:
+			return "You do not have permission to remove this booking";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
@@ -286,7 +349,7 @@ int main()
 	bot.on_log(dpp::utility::cout_logger());
 
 	/* Register slash command here in on_ready */
-	bot.on_ready([&bot](const dpp::ready_t& event) {
+	bot.on_ready([&bot](const dpp::ready_t& event)->dpp::task<void> {
 		/* Wrap command registration in run_once to make sure it doesnt run on every full reconnection */
 		if (dpp::run_once<struct register_bot_commands>()) {
 			if (setupCommands(bot) != 0)
@@ -294,14 +357,18 @@ int main()
 				printf("Error setting up initial commands");
 			}
 			setupBookedTables(bot);
+			co_return;
 		}
 	});
 
 	/* Handle slash command */
-	bot.on_slashcommand([&bot](const dpp::slashcommand_t& event) {
+	
+	bot.on_slashcommand([&bot](const dpp::slashcommand_t& event)->dpp::task<void> {
+		dpp::async thinking = event.co_thinking(true);
 		auto cmdValue = event.command.get_command_name();
 		std::string updateMsg;
 		int rc = 0;
+		co_await thinking;
 		//Could put this all in a try/catch where exception message is output
 		if (cmdValue == "ping") {
 			event.reply("Pong!");
@@ -310,7 +377,8 @@ int main()
 			updateMsg = ((rc = setupCommands(bot)) != 0) ? formatError(rc) : "Successfully updated";
 		}
 		else if (cmdValue == "book") {
-			updateMsg = ((rc = bookTable(bot, event)) != 0) ? formatError(rc) : "Successfully booked";
+			updateMsg = ((rc = co_await bookTable(bot, event)) != 0) ? formatError(rc) : "Successfully booked";
+			//event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
 		}
 		else if (cmdValue == "modify")
 		{
@@ -318,9 +386,10 @@ int main()
 		}
 		else if (cmdValue == "remove")
 		{
-			updateMsg = "Nothing yet";
+			updateMsg = ((rc = removeBooking(bot, event)) != 0) ? formatError(rc) : "Successfully removed";
 		}
-		event.reply(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
+		
+		event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
 	});
 
 	//Add a handler to accept normal commands, maybe starting with ! e.g. !book <user1> <user2> <tableNum> <system>

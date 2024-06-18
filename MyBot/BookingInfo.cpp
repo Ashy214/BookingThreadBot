@@ -27,27 +27,22 @@ BookingInfo::BookingInfo(std::string &p_system)
 }
 
 /// <summary>
-/// Constructor with strings. Use p_bot to see if user exists in guild and populate snowflake if it does
+/// Constructor with strings
 /// </summary>
 BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot) : BookingInfo(p_system)
 {
     _user1String = p_user1;
     _user2String = p_user2;
-    
-    
-   
-    p_bot.guild_search_members(GUILD_ID, p_user2, 1, [&p_bot, this](const dpp::confirmation_callback_t& callback)
-        {
-            if (callback.is_error()) { /* catching an error to log it */
-                p_bot.log(dpp::loglevel::ll_error, callback.get_error().message);
-                return;
-            }
-            dpp::guild_member_map guildMap = callback.get<dpp::guild_member_map>();
-            if (!guildMap.empty())
-            {
-                _user2Member = std::make_shared<dpp::guild_member>(guildMap.begin()->second); //Just return first guild member that matches.
-            }
-        });
+}
+
+/// <summary>
+/// Constructor with strings
+/// </summary>
+BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot, dpp::user &p_creator) : BookingInfo(p_system)
+{
+    _user1String = p_user1;
+    _user2String = p_user2;
+    _creator = p_creator;
 }
 
 //Could do another constructor with the guild_members set
@@ -67,11 +62,6 @@ bool BookingInfo::isBooked()
         return false;
     }
     return true;
-}
-
-void BookingInfo::findUser1(dpp::cluster &p_bot)
-{
-    
 }
 
 //Tells us if the table is suitable for game system being used
@@ -94,6 +84,21 @@ bool BookingInfo::isSuitable(int p_tableNum)
     return suitable;
 }
 
+bool BookingInfo::isOwner(dpp::user p_owner)
+{
+    if(p_owner == *_user1Member->get_user()
+    || p_owner == *_user2Member->get_user())
+    {
+        return true;
+    }
+    return false;
+}
+
+void BookingInfo::clearBooking()
+{
+
+}
+
 //Formats a string that is the table booking format
 //Format is:
 //  User1 vs User2
@@ -101,22 +106,24 @@ bool BookingInfo::isSuitable(int p_tableNum)
 //  System
 std::string BookingInfo::formatMsg(int p_tableNum)
 {
-    std::string user1;
-    std::string user2;
-
-    //We can eliminate this way of doing it by using coroutines, as we don't need to check if callbacks are finished or not
-    if (callbackDone)
+    std::string user1 = _user1Member != nullptr ? _user1Member->get_mention() : _user1String;
+    std::string user2 = _user2Member != nullptr ? _user2Member->get_mention() : _user2String;
+    if (_user1Member == nullptr)
     {
-        user1 = _user1Member != nullptr ? _user1Member->get_mention() : _user1String;
-        user2 = _user2Member != nullptr ? _user2Member->get_mention() : _user2String;
+        printf("user1 null");
     }
-    else
+    if (_user2Member == nullptr)
     {
-        user1 = _user1String;
-        user2 = _user2String;
+        printf("user2 null");
+    }
+    std::string msg = user1 + " vs " + user2 + "\n"
+                      + "Table " + std::to_string(p_tableNum) + "\n"
+                      + _system;
+    std::string creator;
+    if(&_creator != nullptr)
+    {
+        msg.append("\n Booked by: " + _creator.username);
     }
     
-    return user1 + " vs " + user2 + "\n"
-         + "Table " + std::to_string(p_tableNum) + "\n"
-         + _system;
+    return msg;
 }
