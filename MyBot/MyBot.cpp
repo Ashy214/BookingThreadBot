@@ -4,7 +4,6 @@
 #include <fstream>
 #include "BookingInfo.h"
 #include <coroutine>
-#include <regex>
 
 const dpp::snowflake GUILD_ID = 635182631754924032;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
