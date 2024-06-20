@@ -86,8 +86,8 @@ bool BookingInfo::isSuitable(int p_tableNum)
 
 bool BookingInfo::isOwner(dpp::user p_owner)
 {
-    if(p_owner == *_user1Member->get_user()
-    || p_owner == *_user2Member->get_user())
+    if((_user1Member != nullptr && p_owner == *_user1Member->get_user())
+    || (_user2Member != nullptr && p_owner == *_user2Member->get_user()))
     {
         return true;
     }
@@ -96,7 +96,11 @@ bool BookingInfo::isOwner(dpp::user p_owner)
 
 void BookingInfo::clearBooking()
 {
-
+    _user1String = "";
+    _user2String = "";
+    _user1Member.reset();
+    _user2Member.reset();
+    _system = "";
 }
 
 //Formats a string that is the table booking format

@@ -4,6 +4,7 @@
 #include <fstream>
 #include "BookingInfo.h"
 #include <coroutine>
+#include <regex>
 
 const dpp::snowflake GUILD_ID = 635182631754924032;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
@@ -17,6 +18,7 @@ std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<st
 //Report function - The file stored on disk with table bookings will contain snowflake ID's. Not human readable! So will need a function that can go through a bookingFile and convert to usernames.
 // Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
 // Make it compatible with others posting bookings so we keep up-to-date reference of current bookings
+// Update g_bookedTables to hold pointers to BookingInfo objects instead. That way we can replace empty bookings with the new object addresses
 
 //We can use p_bot.guild_get_member to get the member object from snowflake. We can then get mention@ and nickname for them. For string we could use guild_search_members?
 /*
@@ -57,7 +59,7 @@ dpp::task<void> populateGuildMembers(BookingInfo p_bookInfo, dpp::cluster &p_bot
 		{
 			g_bookedTables->at(p_tableNum).set_user1Member(guildMap.begin()->second);
 		}
-		printf("callback1 done");
+		//printf("callback1 done");
 	}
 	if (!p_bookInfo.getUser2String().empty())
 	{
@@ -74,7 +76,7 @@ dpp::task<void> populateGuildMembers(BookingInfo p_bookInfo, dpp::cluster &p_bot
 		{
 			g_bookedTables->at(p_tableNum).set_user2Member(guildMap.begin()->second);
 		}
-		printf("callback2 done");
+		//printf("callback2 done");
 	}
 	
 	co_return;
@@ -115,7 +117,6 @@ void setupBookedTables(dpp::cluster &p_bot)
 	}
 }
 
-//This will need to be modified to somehow work out when we have a userID and to do a @mention
 std::string formatBookInfo(BookingInfo &p_bookInfo, int p_tableNum)
 {
 	std::string user1 = p_bookInfo.getUser1String();
@@ -213,7 +214,7 @@ int setupCommands(dpp::cluster &p_bot)
 }
 
 //This assumes p_bookInfo has been parsed and is valid (no empty user, game system etc)
-int bookTable(BookingInfo &p_bookInfo, int p_tableNum)
+int bookTable(BookingInfo p_bookInfo, int p_tableNum)
 {
 	auto it = g_bookedTables->find(p_tableNum);
 	//We should never see it == g_bookedTables.end() because we validate tableNum is in range of available tables
@@ -276,6 +277,18 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	co_return rc;
 }
 
+//Returns true if user is owner of booking or is administrator, otherwise false
+bool hasPerms(const dpp::slashcommand_t& event, dpp::user &p_user, BookingInfo *p_bookInfo)
+{
+	dpp::permission perms = event.command.get_resolved_permission(p_user.id);
+	if (p_bookInfo->isOwner(p_user)
+	|| perms.has(dpp::p_administrator))
+	{
+		return true;
+	}
+	return false;
+}
+
 //Remove a booking from g_bookedTables and delete the corresponding message posted in the channel
 int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
 {
@@ -287,26 +300,30 @@ int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
 		return -2;
 	}
 
-	BookingInfo bookInfo = g_bookedTables->at(tableNum);
+	BookingInfo *bookInfo = &g_bookedTables->at(tableNum);
 	//Check there is a booking to remove, and if so that it is this user that made the booking or the user is an admin
-	if(bookInfo.isBooked())
+	if(bookInfo->isBooked())
 	{
-		dpp::permission perms = event.command.get_resolved_permission(creator.id);
-		if(bookInfo.isOwner(creator)
-		|| perms.has(dpp::p_administrator))
+		if(hasPerms(event, creator, bookInfo))
 		{
+			//Mutex
 			//User has permission to remove booking so go ahead
-			bookInfo.clearBooking();
+			bookInfo->clearBooking();
+			dumpTableBookings(); //Dumping after deleting the booking in g_bookedTables should effectively 'rewrite' the booking file minus the one we want to remove
+			//Release Mutex
+			
+			//We now need to remove the booking message in the thread
+
 			return 0;
 		}
 		else
 		{
-			return -7;
+			return -8;
 		}
 	}
 	else
 	{
-		return -6;
+		return -7;
 	}
 }
 
@@ -325,8 +342,10 @@ std::string formatError(int p_rc)
 		case -5:
 			return "Successfully booked, but table is not recommended for game system selected";
 		case -6:
+			return "Error accessing booking file";
+		case -7:
 			return "No booking to remove";
-		case -6:
+		case -8:
 			return "You do not have permission to remove this booking";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
@@ -343,7 +362,8 @@ int main()
 		getline(tokenFile, BOT_TOKEN);
 	}
 	/* Create bot cluster */
-	dpp::cluster bot(BOT_TOKEN);
+	dpp::cluster bot(BOT_TOKEN, dpp::i_default_intents | dpp::i_message_content);
+	dpp::cache<dpp::message> message_cache;
 
 	/* Output simple log messages to stdout */
 	bot.on_log(dpp::utility::cout_logger());
@@ -370,19 +390,18 @@ int main()
 		int rc = 0;
 		co_await thinking;
 		//Could put this all in a try/catch where exception message is output
-		if (cmdValue == "ping") {
-			event.reply("Pong!");
-		}
-		else if (cmdValue == "update") {
+		if (cmdValue == "update") {
 			updateMsg = ((rc = setupCommands(bot)) != 0) ? formatError(rc) : "Successfully updated";
 		}
 		else if (cmdValue == "book") {
+			//For booking, we could also use a modal (form), a select menu (text menu with drop downs) or a clickable image as alternative options
 			updateMsg = ((rc = co_await bookTable(bot, event)) != 0) ? formatError(rc) : "Successfully booked";
 			//event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
 		}
 		else if (cmdValue == "modify")
 		{
-			updateMsg = "Nothing yet";
+			//This probably needs to send back a modal (form) with the info pre-filled and let the user modify it to 'edit' the booking
+			updateMsg = "Not implemented yet";
 		}
 		else if (cmdValue == "remove")
 		{
@@ -391,6 +410,45 @@ int main()
 		
 		event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
 	});
+
+	bot.on_message_create([&message_cache, &bot](const dpp::message_create_t& event) {
+		/* Make a permanent pointer using new, for each message to be cached */
+		dpp::message* m = new dpp::message();
+		/* Store the message into the pointer by copying it */
+		*m = event.msg;
+		//Bail out if it is us posting message
+		if (bot.me == m->author)
+		{
+			return;
+		}
+		//Parse message to check if it is a 'booking' i.e. has a table number
+		//Too difficult to parse whether it contains user vs user etc, so easier to take table number then set creator as the 'user' who booked it
+		std::string content = m->content;
+		std::transform(content.begin(), content.end(), content.begin(), ::tolower); //Convert to lower case
+		if (size_t found = content.find("table ") != std::string::npos)
+		{
+			//Found Table keyword so need to get the number
+			int tableNum = std::stoi(content.substr(found + 5, 2));
+			if (tableNum >= 1 || tableNum <= 13)
+			{
+				//We have valid table number so try to 'book' the slot as long as it's not already booked
+				if (!g_bookedTables->at(tableNum).isBooked())
+				{
+					g_bookedTables->at(tableNum).set_user1(m->author.username);
+					dumpTableBookings();
+				}
+			}
+		}
+
+		
+
+		//If it is a booking, store in our g_bookedTables and write to file
+		
+
+		/* Store the new pointer to the cache using the store() method */
+		message_cache.store(m);
+		message_cache.remove(m);
+		});
 
 	//Add a handler to accept normal commands, maybe starting with ! e.g. !book <user1> <user2> <tableNum> <system>
 
