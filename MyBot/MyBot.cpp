@@ -144,14 +144,14 @@ int dumpTableBookings()
 	return 0;
 }
 
-//Writes new booking into file and updates g_bookedTables
+//Writes new booking into file
 //Will need mutex here to ensure multiple clashes don't happen?
-int writeBookedTable(std::map<int, BookingInfo>::iterator &p_it)
+int writeBookedTable(int p_tableNum)
 {
 	std::ofstream bookingFile("testfile.txt", std::ios::app);
 	if (bookingFile.is_open())
 	{
-		bookingFile << formatBookInfo(p_it->second, p_it->first);
+		bookingFile << formatBookInfo(g_bookedTables->at(p_tableNum), p_tableNum);
 		bookingFile.close();
 	}
 	else
@@ -216,14 +216,15 @@ int setupCommands(dpp::cluster &p_bot)
 int bookTable(BookingInfo p_bookInfo, int p_tableNum)
 {
 	auto it = g_bookedTables->find(p_tableNum);
+	BookingInfo* actualBooking = &g_bookedTables->at(p_tableNum);
 	//We should never see it == g_bookedTables.end() because we validate tableNum is in range of available tables
-	if (!it->second.isBooked())
+	if (!actualBooking->isBooked())
 	{
 		//Mutex lock
-		it->second = p_bookInfo; //To fix the need to use g_bookedTables going forward we could create a copy operator to change addresses to be equal
-		writeBookedTable(it);
+		*actualBooking = p_bookInfo;
+		writeBookedTable(p_tableNum); //DOUBLE CHECK THIS ACTUALLY WRITES THE CORRECT VALUE
 		//Mutex unlock
-		if (!it->second.isSuitable(p_tableNum))
+		if (!actualBooking->isSuitable(p_tableNum))
 		{
 			return -5;
 		}
@@ -434,7 +435,7 @@ int main()
 				if (!g_bookedTables->at(tableNum).isBooked())
 				{
 					g_bookedTables->at(tableNum).set_user1(m->author.username);
-					dumpTableBookings();
+					writeBookedTable(tableNum);
 				}
 			}
 		}
