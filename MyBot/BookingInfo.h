@@ -56,6 +56,7 @@ class BookingInfo
         inline std::string getSystem() { return _system; }
         inline void set_user1(std::string& p_user1) { _user1String = p_user1; }
         inline void set_user2(std::string& p_user2) { _user1String = p_user2; }
+        inline void set_system(std::string p_system) { _system = p_system; }
         inline void set_user1Member(dpp::guild_member &p_guildUser1) { _user1Member = std::make_shared<dpp::guild_member>(p_guildUser1); }
         inline void set_user2Member(dpp::guild_member &p_guildUser2) { _user2Member = std::make_shared<dpp::guild_member>(p_guildUser2); }
         //inline void set_callback1(bool p_callback) { _callback1 = p_callback; }
