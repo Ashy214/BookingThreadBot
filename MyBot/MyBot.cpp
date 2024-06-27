@@ -150,7 +150,7 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 				bookingLine.push_back("Other");
 			}
 			//We should now have bookingLine containing user1, user2, table, system
-			BookingInfo currentBooking(bookingLine[0], bookingLine[1], bookingLine[3], p_bot);
+			BookingInfo currentBooking(bookingLine[0], bookingLine[1], bookingLine[3]);
 			int tableNum = std::stoi(bookingLine[2]);
 			g_bookedTables->at(tableNum) = currentBooking;
 			populateGuildMembers(currentBooking, p_bot, tableNum);
@@ -336,7 +336,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	}
 	
 	//Now create bookingInfo object from above parms
-	BookingInfo bookInfo(user1, user2, system, p_bot, creator);
+	BookingInfo bookInfo(user1, user2, system, creator);
 	g_booking_mtx.lock();
 	int rc = bookTable(bookInfo, tableNum);
 	if(rc == 0

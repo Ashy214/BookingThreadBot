@@ -14,8 +14,6 @@ class BookingInfo
         std::string _system;
         dpp::user _creator;
         std::shared_ptr<std::map<std::string, std::vector<int>>> tableSystem;
-        bool _callback1;
-        bool _callback2;
 
         /// <summary>
         /// Constructor. Private as we don't want bookingInfo obj created without users
@@ -31,12 +29,12 @@ class BookingInfo
         /// <summary>
         /// Constructor with strings
         /// </summary>
-        BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot);
+        BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system);
 
         /// <summary>
         /// Constructor with strings
         /// </summary>
-        BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot, dpp::user &p_creator);
+        BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::user &p_creator);
 
         /// <summary>
         /// Destructor
@@ -54,13 +52,12 @@ class BookingInfo
         //inline dpp::guild_member getUser1Member() { return *_user1Member; }
         inline dpp::guild_member getUser2Member() { return *_user2Member; }
         inline std::string getSystem() { return _system; }
+        inline dpp::user getCreator() { return _creator; }
         inline void set_user1(std::string& p_user1) { _user1String = p_user1; }
         inline void set_user2(std::string& p_user2) { _user1String = p_user2; }
         inline void set_system(std::string p_system) { _system = p_system; }
+        inline void set_creator(dpp::user& p_user) { _creator = p_user; }
         inline void set_user1Member(dpp::guild_member &p_guildUser1) { _user1Member = std::make_shared<dpp::guild_member>(p_guildUser1); }
         inline void set_user2Member(dpp::guild_member &p_guildUser2) { _user2Member = std::make_shared<dpp::guild_member>(p_guildUser2); }
-        //inline void set_callback1(bool p_callback) { _callback1 = p_callback; }
-        //inline void set_callback2(bool p_callback) { _callback2 = p_callback; }
-        //inline bool const callbackDone() { return (_callback1 && _callback2); }
 };
 

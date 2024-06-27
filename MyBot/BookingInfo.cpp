@@ -29,7 +29,7 @@ BookingInfo::BookingInfo(std::string &p_system)
 /// <summary>
 /// Constructor with strings
 /// </summary>
-BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot) : BookingInfo(p_system)
+BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system) : BookingInfo(p_system)
 {
     _user1String = p_user1;
     _user2String = p_user2;
@@ -38,7 +38,7 @@ BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string
 /// <summary>
 /// Constructor with strings
 /// </summary>
-BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::cluster &p_bot, dpp::user &p_creator) : BookingInfo(p_system)
+BookingInfo::BookingInfo(std::string &p_user1, std::string &p_user2, std::string &p_system, dpp::user &p_creator) : BookingInfo(p_system)
 {
     _user1String = p_user1;
     _user2String = p_user2;
@@ -87,7 +87,8 @@ bool BookingInfo::isSuitable(int p_tableNum)
 bool BookingInfo::isOwner(dpp::user p_owner)
 {
     if((_user1Member != nullptr && _user1Member->get_user() !=  nullptr && p_owner == *_user1Member->get_user())
-    || (_user2Member != nullptr && _user2Member->get_user() != nullptr && p_owner == *_user2Member->get_user()))
+    || (_user2Member != nullptr && _user2Member->get_user() != nullptr && p_owner == *_user2Member->get_user())
+    || (&_creator != nullptr && _creator == p_owner))
     {
         return true;
     }
