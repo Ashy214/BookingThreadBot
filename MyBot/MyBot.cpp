@@ -10,7 +10,7 @@ std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<st
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
 std::mutex g_cache_mtx;
-dpp::snowflake g_channel_id = 1255535312528998420; //Hard coded for now. This should be updated to the booking channel created each week
+dpp::snowflake g_channel_id = 1255900682603597884; //Hard coded for now. This should be updated to the booking channel created each week
 static std::mutex g_booking_mtx;
 
 //ToDo::
@@ -21,10 +21,9 @@ static std::mutex g_booking_mtx;
 // Create a bookingThreadTester that writes messages into discord to do the book/remove functions etc
 //Report function - The file stored on disk with table bookings will contain snowflake ID's. Not human readable! So will need a function that can go through a bookingFile and convert to usernames.
 // Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
-//Need to read through messages on startup to populate g_tableMessages so we can delete if we remove a booking. Should only really need to be done for the event that we crash and restart after a thread has gone live
 //Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update
-//Need to double check we got nullptr when doing normal message, then removing, then booking then removing again
-//Need to change the isOwner check to also store the booker and allow deletion if they were the one who booked it.
+//Might need some way to corroborate between bookingFile and messages in channel. Maybe a separate command to keep them in sync?
+//Work on automatic posting of booking thread each week, or allow a date to be set?
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 {
@@ -116,11 +115,45 @@ void clearMsgCache()
 	}
 }
 
+dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
+{
+	//Now read through message history to get all bookings the bot has made, so the /remove command can work
+	dpp::confirmation_callback_t confirmation = co_await p_bot.co_messages_get(g_channel_id, 0, 0, 0, 100);
+	if (confirmation.is_error()) { /* catching an error to log it */
+		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+		co_return;
+	}
+
+	//First clear cache as we will repopulate now
+	clearMsgCache();
+
+	dpp::message_map mmap = confirmation.get<dpp::message_map>();
+	//Iterate over mmap looking for messages from ourselves
+	g_cache_mtx.lock();
+	for (auto& [key, msg] : mmap)
+	{
+		if (msg.author != p_bot.me.id)
+		{
+			continue;
+		}
+		int tableNum = extractFromMsg(&msg);
+		if (tableNum >= 1 && tableNum <= 13)
+		{
+			//Successful so update g_tableMessages and store in cache
+			g_tableMessages->at(tableNum) = msg.id;
+			//Create new pointer and copy value of msg into it, as we relinquish this to cache when we store
+			dpp::message* m = new dpp::message;
+			*m = msg;
+			g_message_cache.store(m);
+		}
+	}
+	g_cache_mtx.unlock();
+	co_return;
+}
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
 	BookingInfo emptyBooking;
-	dpp::confirmation_callback_t confirmation;
 	g_booking_mtx.lock();
 	//Populate g_bookedTables g_tableMessages
 	for (int i = 1; i <= 13; i++)
@@ -158,37 +191,7 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 		bookingFile.close();
 	}
 	g_booking_mtx.unlock();
-	//Now read through message history to get all bookings the bot has made, so the /remove command can work
-	confirmation = co_await p_bot.co_messages_get(g_channel_id, 0, 0, 0, 100);
-	if (confirmation.is_error()) { /* catching an error to log it */
-		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-		co_return;
-	}
-
-	//First clear cache as we will repopulate now
-	clearMsgCache();
-
-	dpp::message_map mmap = confirmation.get<dpp::message_map>();
-	//Iterate over mmap looking for messages from ourselves
-	for (auto& [key, msg] : mmap)
-	{
-		if (msg.author != p_bot.me.id)
-		{
-			continue;
-		}
-		int tableNum = extractFromMsg(&msg);
-		if (tableNum >= 1 && tableNum <= 13)
-		{
-			g_cache_mtx.lock();
-			//Successful so update g_tableMessages and store in cache
-			g_tableMessages->at(tableNum) = msg.id;
-			//Create new pointer and copy value of msg into it, as we relinquish this to cache when we store
-			dpp::message* m = new dpp::message;
-			*m = msg;
-			g_message_cache.store(m);
-			g_cache_mtx.unlock();
-		}
-	}
+	co_return;
 }
 
 std::string formatBookInfo(BookingInfo &p_bookInfo, int p_tableNum)
@@ -260,10 +263,10 @@ int setupCommands(dpp::cluster &p_bot)
 		{
 			//newCommand.add_option( dpp::command_option(dpp::co_user, "user1", "User 1 to book for", false) );
 			//newCommand.add_option( dpp::command_option(dpp::co_user, "user2", "User 2 to book for", false) );
-			newCommand.add_option(dpp::command_option(dpp::co_string, "user1", "User 1 to book for", false));
-			newCommand.add_option(dpp::command_option(dpp::co_string, "user2", "User 2 to book for", false));
-			newCommand.add_option( dpp::command_option(dpp::co_integer,"table",	"Table number", false) );
-			newCommand.add_option( dpp::command_option(dpp::co_string, "system", "Game system e.g. 40k/AoS/Kill Team", false) );
+			newCommand.add_option(dpp::command_option(dpp::co_string, "user1", "User 1 to book for", true));
+			newCommand.add_option(dpp::command_option(dpp::co_string, "user2", "User 2 to book for", true));
+			newCommand.add_option( dpp::command_option(dpp::co_integer,"table",	"Table number", true) );
+			newCommand.add_option( dpp::command_option(dpp::co_string, "system", "Game system e.g. 40k/AoS/Kill Team", true) );
 			newCommand.add_option(dpp::command_option(dpp::co_user, "userdiscord1", "Optional User 1 to book for. guest name", false) );
 			//newCommand.add_option(dpp::command_option(dpp::co_string, "optionalguest2", "Optional User 2 to book for. guest name", false));
 		}
@@ -463,7 +466,8 @@ int main()
 			{
 				printf("Error setting up initial commands");
 			}
-			setupBookedTables(bot);
+			co_await setupBookedTables(bot);
+			co_await setupMessageHistory(bot);
 			co_return;
 		}
 	});
