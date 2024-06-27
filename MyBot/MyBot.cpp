@@ -9,6 +9,9 @@ const dpp::snowflake GUILD_ID = 635182631754924032;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
+std::mutex g_cache_mtx;
+dpp::snowflake g_channel_id = 1255535312528998420; //Hard coded for now. This should be updated to the booking channel created each week
+static std::mutex g_booking_mtx;
 
 //ToDo::
 // List tables just for that specific game system
@@ -18,17 +21,11 @@ dpp::cache<dpp::message> g_message_cache;
 // Create a bookingThreadTester that writes messages into discord to do the book/remove functions etc
 //Report function - The file stored on disk with table bookings will contain snowflake ID's. Not human readable! So will need a function that can go through a bookingFile and convert to usernames.
 // Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
-// Make it compatible with others posting bookings so we keep up-to-date reference of current bookings
-// Update g_bookedTables to hold pointers to BookingInfo objects instead. That way we can replace empty bookings with the new object addresses
 //Need to read through messages on startup to populate g_tableMessages so we can delete if we remove a booking. Should only really need to be done for the event that we crash and restart after a thread has gone live
 //Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update
+//Need to double check we got nullptr when doing normal message, then removing, then booking then removing again
+//Need to change the isOwner check to also store the booker and allow deletion if they were the one who booked it.
 
-//We can use p_bot.guild_get_member to get the member object from snowflake. We can then get mention@ and nickname for them. For string we could use guild_search_members?
-/*
-*	We take strings as users. When we create BookingInfo object, we guild_search_members to find snowflake if possible and store in obj. When we output successful booking,
-*	if !snowflake.empty() then trigger mention. If it is then output string
-*	When we write to file, always use string.
-*/
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 {
 	try
@@ -85,11 +82,47 @@ dpp::task<void> populateGuildMembers(BookingInfo p_bookInfo, dpp::cluster &p_bot
 	co_return;
 }
 
+int extractFromMsg(dpp::message *p_msg)
+{
+	//Parse message to check if it is a 'booking' i.e. has a table number
+	std::string content = p_msg->content;
+	std::transform(content.begin(), content.end(), content.begin(), ::tolower); //Convert to lower case
+	//Found table keyword so need to get the number
+	std::stringstream ss(content);
+	std::string token;
+	std::vector<std::string> bookingLine;
+	while (getline(ss, token, '\n'))
+	{
+		if (size_t strStart = token.find("table ") != std::string::npos)
+		{
+			//Found the line with table in it
+			return std::stoi(token.substr(strStart + 5, 2));
+		}
+	}
+	return 0;
+}
+
+//Loop through cache and remove all messages
+void clearMsgCache()
+{
+	if (g_message_cache.count() > 0)
+	{
+		g_cache_mtx.lock();
+		for (auto g = g_message_cache.get_container().begin(); g != g_message_cache.get_container().end(); ++g) {
+			dpp::message* msg = g->second;
+			g_message_cache.remove(msg);
+		}
+		g_cache_mtx.unlock();
+	}
+}
+
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
-void setupBookedTables(dpp::cluster &p_bot)
+dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
 	BookingInfo emptyBooking;
-	//Populate g_bookedTables
+	dpp::confirmation_callback_t confirmation;
+	g_booking_mtx.lock();
+	//Populate g_bookedTables g_tableMessages
 	for (int i = 1; i <= 13; i++)
 	{
 		g_bookedTables->insert({ i, emptyBooking });
@@ -124,6 +157,38 @@ void setupBookedTables(dpp::cluster &p_bot)
 		}
 		bookingFile.close();
 	}
+	g_booking_mtx.unlock();
+	//Now read through message history to get all bookings the bot has made, so the /remove command can work
+	confirmation = co_await p_bot.co_messages_get(g_channel_id, 0, 0, 0, 100);
+	if (confirmation.is_error()) { /* catching an error to log it */
+		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+		co_return;
+	}
+
+	//First clear cache as we will repopulate now
+	clearMsgCache();
+
+	dpp::message_map mmap = confirmation.get<dpp::message_map>();
+	//Iterate over mmap looking for messages from ourselves
+	for (auto& [key, msg] : mmap)
+	{
+		if (msg.author != p_bot.me.id)
+		{
+			continue;
+		}
+		int tableNum = extractFromMsg(&msg);
+		if (tableNum >= 1 && tableNum <= 13)
+		{
+			g_cache_mtx.lock();
+			//Successful so update g_tableMessages and store in cache
+			g_tableMessages->at(tableNum) = msg.id;
+			//Create new pointer and copy value of msg into it, as we relinquish this to cache when we store
+			dpp::message* m = new dpp::message;
+			*m = msg;
+			g_message_cache.store(m);
+			g_cache_mtx.unlock();
+		}
+	}
 }
 
 std::string formatBookInfo(BookingInfo &p_bookInfo, int p_tableNum)
@@ -156,20 +221,23 @@ int dumpTableBookings()
 
 //Writes new booking into file
 //Will need mutex here to ensure multiple clashes don't happen?
-int writeBookedTable(int p_tableNum)
-{
-	std::ofstream bookingFile("testfile.txt", std::ios::app);
-	if (bookingFile.is_open())
-	{
-		bookingFile << formatBookInfo(g_bookedTables->at(p_tableNum), p_tableNum);
-		bookingFile.close();
-	}
-	else
-	{
-		return -6;
-	}
-	return 0;
-}
+//int writeBookedTable(int p_tableNum)
+//{
+//	g_file_mtx.lock();
+//	std::ofstream bookingFile("testfile.txt", std::ios::app);
+//	if (bookingFile.is_open())
+//	{
+//		bookingFile << formatBookInfo(g_bookedTables->at(p_tableNum), p_tableNum);
+//		bookingFile.close();
+//	}
+//	else
+//	{
+//		g_file_mtx.unlock();
+//		return -6;
+//	}
+//	g_file_mtx.unlock();
+//	return 0;
+//}
 
 int setupCommands(dpp::cluster &p_bot)
 {
@@ -228,10 +296,9 @@ int bookTable(BookingInfo p_bookInfo, int p_tableNum)
 	BookingInfo* actualBooking = &g_bookedTables->at(p_tableNum);
 	if (!actualBooking->isBooked())
 	{
-		//Mutex lock
 		*actualBooking = p_bookInfo;
-		writeBookedTable(p_tableNum);
-		//Mutex unlock
+		dumpTableBookings();
+		//writeBookedTable(p_tableNum);
 		if (!actualBooking->isSuitable(p_tableNum))
 		{
 			return -5;
@@ -270,6 +337,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	
 	//Now create bookingInfo object from above parms
 	BookingInfo bookInfo(user1, user2, system, p_bot, creator);
+	g_booking_mtx.lock();
 	int rc = bookTable(bookInfo, tableNum);
 	if(rc == 0
 	|| rc == -5)
@@ -281,6 +349,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 		dpp::message msg(event.command.channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
 		p_bot.message_create(msg);
 	}
+	g_booking_mtx.unlock();
 	co_return rc;
 }
 
@@ -306,7 +375,7 @@ int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
 	{
 		return -2;
 	}
-
+	g_booking_mtx.lock();
 	BookingInfo *bookInfo = &g_bookedTables->at(tableNum);
 	//Check there is a booking to remove, and if so that it is this user that made the booking or the user is an admin
 	if(bookInfo->isBooked())
@@ -317,25 +386,30 @@ int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
 			//User has permission to remove booking so go ahead
 			bookInfo->clearBooking();
 			dumpTableBookings(); //Dumping after deleting the booking in g_bookedTables should effectively 'rewrite' the booking file minus the one we want to remove
-			//Release Mutex
+			g_booking_mtx.unlock();
 			
 			//We now need to remove the booking message in the thread
+			g_cache_mtx.lock();
 			dpp::message* msg = g_message_cache.find(g_tableMessages->at(tableNum));
 			if (msg != nullptr)
 			{
 				p_bot.co_message_delete(msg->id, msg->channel_id);
 				g_message_cache.remove(msg);
+				g_cache_mtx.unlock();
 				return 0;
 			}
+			g_cache_mtx.unlock();
 			return -9;
 		}
 		else
 		{
+			g_booking_mtx.unlock();
 			return -8;
 		}
 	}
 	else
 	{
+		g_booking_mtx.unlock();
 		return -7;
 	}
 }
@@ -425,52 +499,32 @@ int main()
 	});
 
 	bot.on_message_create([&bot](const dpp::message_create_t& event) {
-		/* Make a permanent pointer using new, for each message to be cached */
-		dpp::message* m = new dpp::message();
-		/* Store the message into the pointer by copying it */
-		*m = event.msg;
-		
-		//Parse message to check if it is a 'booking' i.e. has a table number
-		//Too difficult to parse whether it contains user vs user etc, so easier to take table number then set creator as the 'user' who booked it
-		std::string content = m->content;
-		std::transform(content.begin(), content.end(), content.begin(), ::tolower); //Convert to lower case
-		//Think I do getlines on the content rather than parsing entire thing
-		if (content.find("table ") != std::string::npos)
+		dpp::message msg = event.msg;
+		int tableNum = extractFromMsg(&msg);
+		if (tableNum >= 1 && tableNum <= 13)
 		{
-			//Found table keyword so need to get the number
-			std::stringstream ss(content);
-			std::string token;
-			std::vector<std::string> bookingLine;
-			while (getline(ss, token, '\n'))
+			g_booking_mtx.lock();
+			//We have valid table number so store in cache along with ID for use when we need to remove it
+			if (bot.me == msg.author)
 			{
-				if (size_t strStart = token.find("table ") != std::string::npos)
-				{
-					//Found the line with table in it
-					std::string tableStr = token.substr(strStart + 5, 2);
-					int tableNum = std::stoi(token.substr(strStart + 5, 2));
-					//int tableNum = tableStr.at(1) == '\n' ? std::stoi(tableStr.substr(0, 1)) : std::stoi(tableStr);
-
-					if (tableNum >= 1 && tableNum <= 13)
-					{
-						//We have valid table number so store in cache along with ID for use when we need to remove it
-						if (bot.me == m->author)
-						{
-							g_tableMessages->at(tableNum) = m->id;
-							/* Store the new pointer to the cache using the store() method */
-							g_message_cache.store(m);
-							return;
-						}
-						//If another user hasn't booked using the bot, check if table is already booked and if not assign it to this user
-						if (!g_bookedTables->at(tableNum).isBooked())
-						{
-							g_bookedTables->at(tableNum).set_user1(m->author.username);
-							g_bookedTables->at(tableNum).set_system("Other");
-							writeBookedTable(tableNum);
-						}
-					}
-				}
-			}			
+				dpp::message* m = new dpp::message;
+				*m = msg;
+				g_tableMessages->at(tableNum) = m->id;
+				/* Store the new pointer to the cache using the store() method */
+				g_message_cache.store(m);
+				g_booking_mtx.unlock();
+				return;
+			}
+			//If another user hasn't booked using the bot, check if table is already booked and if not assign it to this user
+			if (!g_bookedTables->at(tableNum).isBooked())
+			{
+				g_bookedTables->at(tableNum).set_user1(msg.author.username);
+				g_bookedTables->at(tableNum).set_system("Other");
+				dumpTableBookings();
+			}
+			g_booking_mtx.unlock();
 		}
+								
 		});
 
 	//Add a handler to accept normal commands, maybe starting with ! e.g. !book <user1> <user2> <tableNum> <system>
