@@ -86,8 +86,8 @@ bool BookingInfo::isSuitable(int p_tableNum)
 
 bool BookingInfo::isOwner(dpp::user p_owner)
 {
-    if((_user1Member != nullptr && p_owner == *_user1Member->get_user())
-    || (_user2Member != nullptr && p_owner == *_user2Member->get_user()))
+    if((_user1Member != nullptr && _user1Member->get_user() !=  nullptr && p_owner == *_user1Member->get_user())
+    || (_user2Member != nullptr && _user1Member->get_user() != nullptr && p_owner == *_user2Member->get_user()))
     {
         return true;
     }
