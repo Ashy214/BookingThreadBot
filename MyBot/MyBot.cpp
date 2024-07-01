@@ -4,14 +4,19 @@
 #include <fstream>
 #include "BookingInfo.h"
 #include <coroutine>
+#include <ctime>
+#include <chrono>
+#include "date.h"
 
 const dpp::snowflake GUILD_ID = 635182631754924032;
+const dpp::snowflake CATEGORY_ID = 635182631754924033;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
 std::mutex g_cache_mtx;
 dpp::snowflake g_channel_id = 1255900682603597884; //Hard coded for now. This should be updated to the booking channel created each week
 static std::mutex g_booking_mtx;
+bool g_auto = false;
 
 //ToDo::
 // List tables just for that specific game system
@@ -248,8 +253,9 @@ int setupCommands(dpp::cluster &p_bot)
 	std::map<std::string, std::string> listCommands = { {"book",	"Make a table booking"},
 														{"remove",	"Delete a table booking"} ,
 														{"modify",	"Change a table booking"} ,
-														{"help",	"Info on booking usage"},
-														{"update",	"Update commands"} };
+														{"help",	"Info on booking usage"} ,
+														{"update",	"Update commands"} ,
+														{"channel", "Create a new booking channel"} };
 	std::vector<dpp::slashcommand> commands;
 	auto botId = p_bot.me.id;
 	p_bot.guild_bulk_command_delete(GUILD_ID);
@@ -273,12 +279,16 @@ int setupCommands(dpp::cluster &p_bot)
 		else if (it.first == "remove")
 		{
 			//newCommand.add_option(dpp::command_option(dpp::co_string, "user",  "User booking to remove", false));
-			newCommand.add_option(dpp::command_option(dpp::co_integer, "table", "Table booking to remove", false));
+			newCommand.add_option(dpp::command_option(dpp::co_integer, "table", "Table booking to remove", true));
 		}
 		else if (it.first == "modify")
 		{
 			newCommand.add_option(dpp::command_option(dpp::co_string, "user", "User booking to modify", false));
 			newCommand.add_option(dpp::command_option(dpp::co_string, "table", "Table booking to modify", false));
+		}
+		else if (it.first == "channel")
+		{
+			newCommand.add_option(dpp::command_option(dpp::co_string, "date", "date in format DD-MM-YYYY", false));
 		}
 		//No options for help or update
 		commands.push_back(newCommand);
@@ -436,12 +446,56 @@ std::string formatError(int p_rc)
 		case -7:
 			return "No booking to remove";
 		case -8:
-			return "You do not have permission to remove this booking";
+			return "You do not have permission";
 		case -9:
 			return "Booking removed, but cannot delete booking message as it was not made via the bot. Please remove it manually";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
+}
+
+//Create a new booking channel for the next available Tuesday, or allow a specific date to be input to book for that Tuesday
+dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
+{
+	//First off we need to check if user is an admin, otherwise immediately return
+	dpp::user creator = p_event.command.get_issuing_user();
+	dpp::permission perms = p_event.command.get_resolved_permission(creator.id);
+	if (!perms.has(dpp::p_administrator))
+	{
+		co_return -8;
+	}
+
+	dpp::channel bookingChannel;
+	std::string strDate;
+	//There is NO date-picker or 'date' data type that Discord can enforce from the slash command, so we are relying on the user providing the correct input in date format
+	//For that reason, we will ONLY accept a date of DD-MM-YYYY to make it easier to parse. If it's wrong we simply reject and don't execute this command
+	dpp::command_interaction cmd_data = p_event.command.get_command_interaction();
+	if (!cmd_data.options.empty())
+	{
+		strDate = std::get<std::string>(p_event.get_parameter("date"));
+		//For now we don't need this, but in future we will need to calculate days before this date for when to post the thread automatically
+		//std::istringstream ss(strDate);
+		//std::chrono::system_clock::time_point tp;
+		//ss >> date::parse("%d-%m-%Y", tp);
+	}
+	else
+	{
+		//Always want to get the next tuesday
+		auto todays_date = date::floor<date::days>(std::chrono::system_clock::now());
+		auto nextTuesday = todays_date + date::days{ 7 } -
+			(date::weekday{ todays_date } - date::Tuesday);
+		//std::cout << nextTuesday << '\n';
+		strDate = date::format("%a-%m-%Y", nextTuesday);
+	}
+	bookingChannel.set_name("table-booking-" + strDate);
+	bookingChannel.set_guild_id(GUILD_ID);
+	bookingChannel.set_parent_id(CATEGORY_ID);
+	dpp::confirmation_callback_t confirmation = co_await p_bot.co_channel_create(bookingChannel);
+	if (confirmation.is_error()) { /* catching an error to log it */
+		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+		co_return 0;
+	}
+	
 }
 
 int main()
@@ -487,16 +541,19 @@ int main()
 		else if (cmdValue == "book") {
 			//For booking, we could also use a modal (form), a select menu (text menu with drop downs) or a clickable image as alternative options
 			updateMsg = ((rc = co_await bookTable(bot, event)) != 0) ? formatError(rc) : "Successfully booked";
-			//event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
 		}
 		else if (cmdValue == "modify")
 		{
 			//This probably needs to send back a modal (form) with the info pre-filled and let the user modify it to 'edit' the booking
-			updateMsg = "Not implemented yet";
+			updateMsg = "Not implemented yet. Please remove and then re-book the table";
 		}
 		else if (cmdValue == "remove")
 		{
 			updateMsg = ((rc = removeBooking(bot, event)) != 0) ? formatError(rc) : "Successfully removed";
+		}
+		else if (cmdValue == "channel")
+		{
+			updateMsg = ((rc = co_await newChannel(bot, event)) != 0) ? formatError(rc) : "New booking thread created";
 		}
 		
 		event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
