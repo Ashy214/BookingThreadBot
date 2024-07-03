@@ -14,21 +14,30 @@ std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<st
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
 std::mutex g_cache_mtx;
-dpp::snowflake g_channel_id = 1255900682603597884; //Hard coded for now. This should be updated to the booking channel created each week
+dpp::snowflake g_channel_id;
 static std::mutex g_booking_mtx;
 bool g_auto = false;
+std::string g_bookingFile;
+std::string g_botInfo = "botInfo.txt";
 
-//ToDo::
+//Future features:
 // List tables just for that specific game system
 // Allow booking for more than 2 people
 // Image of table booking to allow user to select from image
 // BookTable currently only handles slash commands. Would be useful to allow for someone to book with freeform input, perhaps from a ? command
 // Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
-//Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update. Alternatively could cache ALL messages and if we find it's booked check message ID and see if msg still exists?
-//Might need some way to corroborate between bookingFile and messages in channel. Maybe a separate command to keep them in sync?
-//Work on automatic posting of booking thread each week, or allow a date to be set? Perhaps kick off a new thread that rusn the newchannel function but with an optional delay as a parm to fire it off when needed?
-//Looking for game system. /LFG to sign up for a system, or to see whos LFG for a specific system. Can 'apply' to play a game and have user accept it etc.
-//Some way of checking in people on the night. Check for an reaction on the booking msg and can fill out whatever committee uses to see who's paid the night etc. 
+// Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update. Alternatively could cache ALL messages and if we find it's booked check message ID and see if msg still exists?
+// Might need some way to corroborate between bookingFile and messages in channel. Maybe a separate command to keep them in sync?
+// Work on automatic posting of booking thread each week, or allow a date to be set? Perhaps kick off a new thread that rusn the newchannel function but with an optional delay as a parm to fire it off when needed?
+// Looking for game system. /LFG to sign up for a system, or to see whos LFG for a specific system. Can 'apply' to play a game and have user accept it etc.
+// Some way of checking in people on the night. Check for an reaction on the booking msg and can fill out whatever committee uses to see who's paid the night etc. 
+
+//ToDo:
+//	Update channel ID when we create new channel each week
+//	Archive bookingFile and create new one when creating new thread
+//	Restrict slash commands to only be run in an admin channel or g_channel_id
+//	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though)
+//	What if /channel is run before week is over? We will delete current and lose all bookings - need to add a warning before doing so or prevent it entirely
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 {
@@ -112,12 +121,57 @@ void clearMsgCache()
 	if (g_message_cache.count() > 0)
 	{
 		g_cache_mtx.lock();
-		for (auto g = g_message_cache.get_container().begin(); g != g_message_cache.get_container().end(); ++g) {
-			dpp::message* msg = g->second;
+		auto g = g_message_cache.get_container();
+		for (auto i = g.begin(); i != g.end(); i++) {
+			dpp::message* msg = i->second;
 			g_message_cache.remove(msg);
 		}
 		g_cache_mtx.unlock();
 	}
+}
+
+//Dumps info bot needs on restart, such as current booking file name and current channel ID of booking thread
+int dumpBotInfo()
+{
+	std::ofstream botFile(g_botInfo);
+	if (botFile.is_open())
+	{
+		botFile << g_bookingFile << '\n';
+		botFile << g_channel_id;
+		botFile.close();
+	}
+	else
+	{
+		return -11;
+	}
+	return 0;
+}
+
+//populates info bot needs on restart, such as current booking file name and current channel ID of booking thread
+int getBotInfo()
+{
+	std::string line;
+	std::ifstream botInfo(g_botInfo);
+	std::vector<std::string> botInfoLines;
+	if (botInfo.is_open())
+	{
+		//This reads each line from file which should be:
+		//	g_bookingFile
+		//	g_channel_id
+		while (getline(botInfo, line))
+		{
+			std::cout << line << '\n';
+			botInfoLines.push_back(line);
+		}
+		g_bookingFile = botInfoLines[0]; //NEED TO CHECK THESE CONVERT OKAY FROM STRING -> SNOWFLAKE
+		g_channel_id = botInfoLines[1];
+		botInfo.close();
+	}
+	else
+	{
+		return -11;
+	}
+	return 0;
 }
 
 dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
@@ -158,6 +212,7 @@ dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
+	getBotInfo();
 	BookingInfo emptyBooking;
 	g_booking_mtx.lock();
 	//Populate g_bookedTables g_tableMessages
@@ -168,7 +223,7 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 	}
 
 	std::string line;
-	std::ifstream bookingFile("testfile.txt");
+	std::ifstream bookingFile(g_bookingFile);
 	if (bookingFile.is_open())
 	{
 		//This reads each line from file, then splits into tokens delimited by ','
@@ -210,7 +265,7 @@ std::string formatBookInfo(BookingInfo &p_bookInfo, int p_tableNum)
 //Dumps all table bookings to current file
 int dumpTableBookings()
 {
-	std::ofstream bookingFile("testfile.txt");
+	std::ofstream bookingFile(g_bookingFile);
 	if (bookingFile.is_open())
 	{
 		//Iterate through map dumping table num and bookingInfo to file
@@ -226,26 +281,6 @@ int dumpTableBookings()
 	}
 	return 0;
 }
-
-//Writes new booking into file
-//Will need mutex here to ensure multiple clashes don't happen?
-//int writeBookedTable(int p_tableNum)
-//{
-//	g_file_mtx.lock();
-//	std::ofstream bookingFile("testfile.txt", std::ios::app);
-//	if (bookingFile.is_open())
-//	{
-//		bookingFile << formatBookInfo(g_bookedTables->at(p_tableNum), p_tableNum);
-//		bookingFile.close();
-//	}
-//	else
-//	{
-//		g_file_mtx.unlock();
-//		return -6;
-//	}
-//	g_file_mtx.unlock();
-//	return 0;
-//}
 
 int setupCommands(dpp::cluster &p_bot)
 {
@@ -360,7 +395,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 		co_await populateGuildMembers(bookInfo, p_bot, tableNum);
 		
 		//Use g_bookedTables from here onwards as bookInfo was just for checking booking/passing through data
-		dpp::message msg(event.command.channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
+		dpp::message msg(g_channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
 		p_bot.message_create(msg);
 	}
 	g_booking_mtx.unlock();
@@ -450,12 +485,17 @@ std::string formatError(int p_rc)
 			return "You do not have permission";
 		case -9:
 			return "Booking removed, but cannot delete booking message as it was not made via the bot. Please remove it manually";
+		case -10:
+			return "Error creating/deleting channel";
+		case -11:
+			return "Error accessing botInfo file";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
 }
 
 //Create a new booking channel for the next available Tuesday, or allow a specific date to be input to book for that Tuesday
+//When a new channel is created, amend g_channel_id so we post in there going forward, and archive/update the bookingFile
 dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 {
 	//First off we need to check if user is an admin, otherwise immediately return
@@ -486,25 +526,49 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		auto nextTuesday = todays_date + date::days{ 7 } -
 			(date::weekday{ todays_date } - date::Tuesday);
 		//std::cout << nextTuesday << '\n';
-		strDate = date::format("%a-%m-%Y", nextTuesday);
+		strDate = date::format("%d-%m-%Y", nextTuesday);
 	}
+
+	//First dump current bookingInfo out to file
+	dumpTableBookings();
+
+	//Now create new channel and delete old
 	bookingChannel.set_name("table-booking-" + strDate);
 	bookingChannel.set_guild_id(GUILD_ID);
 	bookingChannel.set_parent_id(CATEGORY_ID);
 	dpp::confirmation_callback_t confirmation = co_await p_bot.co_channel_create(bookingChannel);
 	if (confirmation.is_error()) { /* catching an error to log it */
 		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-		co_return 0;
+		co_return -10;
 	}
-	g_channel_id = bookingChannel.id; //Need to double check this is actually set after the callback
+	bookingChannel = confirmation.get<dpp::channel>(); //Get the newly created channel object
+	confirmation = co_await p_bot.co_channel_delete(g_channel_id);
+	if (confirmation.is_error()) { /* catching an error to log it */
+		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+		co_return -10;
+	}
+	//Potential for a clash without having a mutex on this but extremely unlikely to ever happen (Only if auto thread and manual creation happen at same time)
+	g_bookingFile = "SWATBookings-" + strDate;
+	g_channel_id = bookingChannel.id;
+
+	//Update botInfo in case we crash so we can get these ID's + filename back in future
+	dumpBotInfo();
+
+	//Now set ourselves back to a 'clean' state with no bookings
+	setupBookedTables(p_bot);
+	clearMsgCache();
+	co_return 0;
 }
 
 int newChannelDelay(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event, time_t p_timer)
 {
-	Sleep(p_timer);
+	Sleep(5);
 	//Now check here that g_auto is still set. If not, we have been disabled so should just exit thread
-	newChannel(p_bot, p_event);
-	return 1;
+	if (g_auto)
+	{
+		newChannel(p_bot, p_event);
+	}
+	return 0;
 }
 
 int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
@@ -512,15 +576,11 @@ int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 	g_auto = !g_auto;
 	if (g_auto)
 	{
-		//Means it was false -> true so start a newChannel function with a delay to post 5 days before if possible, otherwise immediately
+		//Means it was false -> true so start a newChannel function with a delay to post 6 days before if possible, otherwise immediately
 		//Do some calculations for a delay here and pass it to newChannelDelay function
-		time_t delay;
+		time_t delay = 5; //Hard-coded delay for now
+		//Do some additional checks here to see if there is already a thread running. If there is we shouldn't start another one!
 		std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
-	}
-	else
-	{
-		//Means it was true -> false. Don't need to do anything here as the thread will check just before firing if we have switched off
-		
 	}
 	return 0;
 }
