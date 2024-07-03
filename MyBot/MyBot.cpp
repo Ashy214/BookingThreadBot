@@ -23,12 +23,12 @@ bool g_auto = false;
 // Allow booking for more than 2 people
 // Image of table booking to allow user to select from image
 // BookTable currently only handles slash commands. Would be useful to allow for someone to book with freeform input, perhaps from a ? command
-// Create a bookingThreadTester that writes messages into discord to do the book/remove functions etc
-//Report function - The file stored on disk with table bookings will contain snowflake ID's. Not human readable! So will need a function that can go through a bookingFile and convert to usernames.
 // Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
-//Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update
+//Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update. Alternatively could cache ALL messages and if we find it's booked check message ID and see if msg still exists?
 //Might need some way to corroborate between bookingFile and messages in channel. Maybe a separate command to keep them in sync?
-//Work on automatic posting of booking thread each week, or allow a date to be set?
+//Work on automatic posting of booking thread each week, or allow a date to be set? Perhaps kick off a new thread that rusn the newchannel function but with an optional delay as a parm to fire it off when needed?
+//Looking for game system. /LFG to sign up for a system, or to see whos LFG for a specific system. Can 'apply' to play a game and have user accept it etc.
+//Some way of checking in people on the night. Check for an reaction on the booking msg and can fill out whatever committee uses to see who's paid the night etc. 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 {
@@ -255,7 +255,8 @@ int setupCommands(dpp::cluster &p_bot)
 														{"modify",	"Change a table booking"} ,
 														{"help",	"Info on booking usage"} ,
 														{"update",	"Update commands"} ,
-														{"channel", "Create a new booking channel"} };
+														{"channel", "Create a new booking channel"} ,
+														{"auto",    "Set auto booking thread creation"} };
 	std::vector<dpp::slashcommand> commands;
 	auto botId = p_bot.me.id;
 	p_bot.guild_bulk_command_delete(GUILD_ID);
@@ -495,7 +496,33 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
 		co_return 0;
 	}
-	
+	g_channel_id = bookingChannel.id; //Need to double check this is actually set after the callback
+}
+
+int newChannelDelay(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event, time_t p_timer)
+{
+	Sleep(p_timer);
+	//Now check here that g_auto is still set. If not, we have been disabled so should just exit thread
+	newChannel(p_bot, p_event);
+	return 1;
+}
+
+int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
+{
+	g_auto = !g_auto;
+	if (g_auto)
+	{
+		//Means it was false -> true so start a newChannel function with a delay to post 5 days before if possible, otherwise immediately
+		//Do some calculations for a delay here and pass it to newChannelDelay function
+		time_t delay;
+		std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
+	}
+	else
+	{
+		//Means it was true -> false. Don't need to do anything here as the thread will check just before firing if we have switched off
+		
+	}
+	return 0;
 }
 
 int main()
@@ -554,6 +581,10 @@ int main()
 		else if (cmdValue == "channel")
 		{
 			updateMsg = ((rc = co_await newChannel(bot, event)) != 0) ? formatError(rc) : "New booking thread created";
+		}
+		else if (cmdValue == "auto")
+		{
+			updateMsg = ((rc = autoThread(bot, event)) != 0) ? formatError(rc) : "Auto creation set to " + g_auto;
 		}
 		
 		event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
