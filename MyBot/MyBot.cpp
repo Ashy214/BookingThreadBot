@@ -10,6 +10,7 @@
 
 const dpp::snowflake GUILD_ID = 635182631754924032;
 const dpp::snowflake CATEGORY_ID = 635182631754924033;
+const dpp::snowflake g_admin_chan_id = 635182631754924034;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
@@ -33,10 +34,7 @@ std::string g_botInfo = "botInfo.txt";
 // Some way of checking in people on the night. Check for an reaction on the booking msg and can fill out whatever committee uses to see who's paid the night etc. 
 
 //ToDo:
-//	Update channel ID when we create new channel each week
-//	Archive bookingFile and create new one when creating new thread
-//	Restrict slash commands to only be run in an admin channel or g_channel_id
-//	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though)
+//	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
 //	What if /channel is run before week is over? We will delete current and lose all bookings - need to add a warning before doing so or prevent it entirely
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -213,6 +211,7 @@ dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
 dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
 	getBotInfo();
+	g_bookedTables->clear();
 	BookingInfo emptyBooking;
 	g_booking_mtx.lock();
 	//Populate g_bookedTables g_tableMessages
@@ -415,14 +414,14 @@ bool hasPerms(const dpp::slashcommand_t& event, dpp::user &p_user, BookingInfo *
 }
 
 //Remove a booking from g_bookedTables and delete the corresponding message posted in the channel
-int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
+dpp::task<int> removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
 {
 	int tableNum = static_cast<int>(std::get<int64_t>(event.get_parameter("table")));
 	dpp::user creator = event.command.get_issuing_user();
 
 	if (tableNum < 1 || tableNum > 13)
 	{
-		return -2;
+		co_return -2;
 	}
 	g_booking_mtx.lock();
 	BookingInfo *bookInfo = &g_bookedTables->at(tableNum);
@@ -442,24 +441,29 @@ int removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& event)
 			dpp::message* msg = g_message_cache.find(g_tableMessages->at(tableNum));
 			if (msg != nullptr)
 			{
-				p_bot.co_message_delete(msg->id, msg->channel_id);
+				dpp::confirmation_callback_t confirmation = co_await p_bot.co_message_delete(msg->id, msg->channel_id);
+				if (confirmation.is_error()) { /* catching an error to log it */
+					p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+					g_cache_mtx.unlock();
+					co_return -12;
+				}
 				g_message_cache.remove(msg);
 				g_cache_mtx.unlock();
-				return 0;
+				co_return 0;
 			}
 			g_cache_mtx.unlock();
-			return -9;
+			co_return -9;
 		}
 		else
 		{
 			g_booking_mtx.unlock();
-			return -8;
+			co_return -8;
 		}
 	}
 	else
 	{
 		g_booking_mtx.unlock();
-		return -7;
+		co_return -7;
 	}
 }
 
@@ -489,6 +493,10 @@ std::string formatError(int p_rc)
 			return "Error creating/deleting channel";
 		case -11:
 			return "Error accessing botInfo file";
+		case -12:
+			return "Error deleting msg from channel";
+		case -13:
+			return "Error in checking if channel already exists";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
@@ -528,27 +536,52 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		//std::cout << nextTuesday << '\n';
 		strDate = date::format("%d-%m-%Y", nextTuesday);
 	}
-
+	std::string newChannelName = "table-booking-" + strDate;
+	bool foundChannel = false;
+	//Now check we don't already have a booking thread for this week (If strDate is the same as the booking thread name it means we must not have passed next tuesday, as strDate always works out next available one)
+	dpp::confirmation_callback_t confirmation = co_await p_bot.co_channel_get(g_channel_id);
+	if (!confirmation.is_error()) { //If no error, means channel exists so we need to check if it's the current weekly thread or not
+		dpp::channel currentChannel = confirmation.get<dpp::channel>();
+		foundChannel = true;
+		if (currentChannel.name == newChannelName)
+		{
+			//We have already created a channel for this coming tuesday so exit out, otherwise continue to create new channel
+			co_return -13;
+		}
+	}
+	else
+	{
+		if(confirmation.get_error().message != "Unknown Channel")
+		{
+			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message); //Do we hit this error if the channle doesn't exist?!
+			co_return -13;
+		}
+		
+	}
 	//First dump current bookingInfo out to file
 	dumpTableBookings();
 
 	//Now create new channel and delete old
-	bookingChannel.set_name("table-booking-" + strDate);
+	bookingChannel.set_name(newChannelName);
 	bookingChannel.set_guild_id(GUILD_ID);
 	bookingChannel.set_parent_id(CATEGORY_ID);
-	dpp::confirmation_callback_t confirmation = co_await p_bot.co_channel_create(bookingChannel);
+	confirmation = co_await p_bot.co_channel_create(bookingChannel);
 	if (confirmation.is_error()) { /* catching an error to log it */
 		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
 		co_return -10;
 	}
 	bookingChannel = confirmation.get<dpp::channel>(); //Get the newly created channel object
-	confirmation = co_await p_bot.co_channel_delete(g_channel_id);
-	if (confirmation.is_error()) { /* catching an error to log it */
-		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-		co_return -10;
+
+	if (foundChannel)
+	{
+		confirmation = co_await p_bot.co_channel_delete(g_channel_id);
+		if (confirmation.is_error()) { /* catching an error to log it */
+			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+			co_return -10;
+		}
 	}
 	//Potential for a clash without having a mutex on this but extremely unlikely to ever happen (Only if auto thread and manual creation happen at same time)
-	g_bookingFile = "SWATBookings-" + strDate;
+	g_bookingFile = "SWATBookings-" + strDate  + "-" + bookingChannel.id.str();
 	g_channel_id = bookingChannel.id;
 
 	//Update botInfo in case we crash so we can get these ID's + filename back in future
@@ -560,6 +593,7 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	co_return 0;
 }
 
+//Can't create an overloaded newChannel function as that doesn't seem to work with threads
 int newChannelDelay(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event, time_t p_timer)
 {
 	Sleep(5);
@@ -579,6 +613,8 @@ int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 		//Means it was false -> true so start a newChannel function with a delay to post 6 days before if possible, otherwise immediately
 		//Do some calculations for a delay here and pass it to newChannelDelay function
 		time_t delay = 5; //Hard-coded delay for now
+		p_bot.log(dpp::loglevel::ll_error, "delay is: " + delay);
+
 		//Do some additional checks here to see if there is already a thread running. If there is we shouldn't start another one!
 		std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
 	}
@@ -621,8 +657,14 @@ int main()
 		std::string updateMsg;
 		int rc = 0;
 		co_await thinking;
+		if (event.command.channel_id != g_channel_id && event.command.channel_id != g_admin_chan_id)
+		{
+			updateMsg = "Commands cannot be run in this channel";
+			std::string logMsg = event.command.channel_id.str() + " g_channel_id = " + g_channel_id.str();
+			bot.log(dpp::loglevel::ll_error, logMsg);
+		}
 		//Could put this all in a try/catch where exception message is output
-		if (cmdValue == "update") {
+		else if (cmdValue == "update") {
 			updateMsg = ((rc = setupCommands(bot)) != 0) ? formatError(rc) : "Successfully updated";
 		}
 		else if (cmdValue == "book") {
@@ -636,7 +678,7 @@ int main()
 		}
 		else if (cmdValue == "remove")
 		{
-			updateMsg = ((rc = removeBooking(bot, event)) != 0) ? formatError(rc) : "Successfully removed";
+			updateMsg = ((rc = co_await removeBooking(bot, event)) != 0) ? formatError(rc) : "Successfully removed";
 		}
 		else if (cmdValue == "channel")
 		{
