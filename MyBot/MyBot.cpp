@@ -8,9 +8,9 @@
 #include <chrono>
 #include "date.h"
 
-const dpp::snowflake GUILD_ID = 635182631754924032;
-const dpp::snowflake CATEGORY_ID = 635182631754924033;
-const dpp::snowflake g_admin_chan_id = 635182631754924034;
+dpp::snowflake GUILD_ID = 635182631754924032;
+dpp::snowflake CATEGORY_ID = 635182631754924033;
+dpp::snowflake g_admin_chan_id = 635182631754924034;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
@@ -35,7 +35,6 @@ std::string g_botInfo = "botInfo.txt";
 
 //ToDo:
 //	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
-//	What if /channel is run before week is over? We will delete current and lose all bookings - need to add a warning before doing so or prevent it entirely
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 {
@@ -146,10 +145,10 @@ int dumpBotInfo()
 }
 
 //populates info bot needs on restart, such as current booking file name and current channel ID of booking thread
-int getBotInfo()
+std::vector<std::string> getBotInfo(std::string p_file)
 {
 	std::string line;
-	std::ifstream botInfo(g_botInfo);
+	std::ifstream botInfo(p_file);
 	std::vector<std::string> botInfoLines;
 	if (botInfo.is_open())
 	{
@@ -161,15 +160,9 @@ int getBotInfo()
 			std::cout << line << '\n';
 			botInfoLines.push_back(line);
 		}
-		g_bookingFile = botInfoLines[0]; //NEED TO CHECK THESE CONVERT OKAY FROM STRING -> SNOWFLAKE
-		g_channel_id = botInfoLines[1];
 		botInfo.close();
 	}
-	else
-	{
-		return -11;
-	}
-	return 0;
+	return botInfoLines;
 }
 
 dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
@@ -210,7 +203,24 @@ dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
-	getBotInfo();
+	std::vector<std::string> botInfo = getBotInfo(g_botInfo);
+	if (botInfo.size() == 0)
+	{
+		p_bot.log(dpp::loglevel::ll_error, "Error reading botInfo file");
+	}
+	g_bookingFile = botInfo[0];
+	g_channel_id = botInfo[1];
+	
+	//This are constant IDs that never change, but having them stored in a file makes it easier to have the bot running on multiple machines for testing purposes
+	botInfo = getBotInfo("chanids.txt");
+	if (botInfo.size() == 0)
+	{
+		p_bot.log(dpp::loglevel::ll_error, "Error reading chanids file");
+	}
+	GUILD_ID = botInfo[0];
+	CATEGORY_ID = botInfo[1];
+	g_admin_chan_id = botInfo[2];
+
 	g_bookedTables->clear();
 	BookingInfo emptyBooking;
 	g_booking_mtx.lock();
@@ -287,7 +297,7 @@ int setupCommands(dpp::cluster &p_bot)
 	std::map<std::string, std::string> listCommands = { {"book",	"Make a table booking"},
 														{"remove",	"Delete a table booking"} ,
 														{"modify",	"Change a table booking"} ,
-														{"help",	"Info on booking usage"} ,
+														//{"help",	"Info on booking usage"} ,
 														{"update",	"Update commands"} ,
 														{"channel", "Create a new booking channel"} ,
 														{"auto",    "Set auto booking thread creation"} };
@@ -497,6 +507,8 @@ std::string formatError(int p_rc)
 			return "Error deleting msg from channel";
 		case -13:
 			return "Error in checking if channel already exists";
+		case -14:
+			return "Channel already exists for this week";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
@@ -546,7 +558,7 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		if (currentChannel.name == newChannelName)
 		{
 			//We have already created a channel for this coming tuesday so exit out, otherwise continue to create new channel
-			co_return -13;
+			co_return -14;
 		}
 	}
 	else
@@ -596,8 +608,7 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 //Can't create an overloaded newChannel function as that doesn't seem to work with threads
 int newChannelDelay(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event, time_t p_timer)
 {
-	Sleep(5);
-	//Now check here that g_auto is still set. If not, we have been disabled so should just exit thread
+	//Now check here that g_auto is still set. If not, we have been disabled so should just exit thread. What if we have disabled/enabled again, we fire both threads?
 	if (g_auto)
 	{
 		newChannel(p_bot, p_event);
@@ -607,6 +618,9 @@ int newChannelDelay(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event, tim
 
 int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 {
+	//This could work by doing condition variables: https://en.cppreference.com/w/cpp/thread/condition_variable
+	//Kick off thread. Work out how long it needs to sleep before posting, then wait on condition variable that says to kill thread. If woken up, check if kill or not and if not then post thread. Issue with spurious wakeups?
+	//Maybe just a sep thread constantly running - checks time every 30m. If auto off then exit thread, otherwise check and sleep. If on the right day then just post
 	g_auto = !g_auto;
 	if (g_auto)
 	{
@@ -617,12 +631,14 @@ int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 
 		//Do some additional checks here to see if there is already a thread running. If there is we shouldn't start another one!
 		std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
+		
 	}
 	return 0;
 }
 
 int main()
 {
+	std::cout << "hello";
 	std::string BOT_TOKEN;
 	std::ifstream tokenFile("bottoken.txt");
 	if (tokenFile.is_open())
