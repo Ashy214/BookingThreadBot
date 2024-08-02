@@ -36,6 +36,7 @@ std::string g_botInfo = "botInfo.txt";
 //ToDo:
 //	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
 //  Move archived threads to archive channel rather than deleting
+//  Function to list current booking file
 //	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
 
 //Done:
@@ -207,8 +208,9 @@ dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
 	co_return;
 }
 
-void readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool p_list)
+std::string readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool p_list)
 {
+	std::string listOutput;
 	std::string line;
 	if (p_bookFile.is_open())
 	{
@@ -234,6 +236,8 @@ void readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool p_list
 			if (p_list)
 			{
 				//Build up msg to output to user
+				listOutput.append(line);
+				listOutput.append("\n");
 			}
 			else
 			{
@@ -243,6 +247,7 @@ void readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool p_list
 		}
 		p_bookFile.close();
 	}
+	return listOutput;
 }
 
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
@@ -267,7 +272,7 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 	g_admin_chan_id = botInfo[2];
 	g_bookedTables->clear();
 	BookingInfo emptyBooking;
-	g_booking_mtx.lock();
+	g_booking_mtx.lock(); //May need to remove this if we ever have a case where this function could be run in quick succession (The coawait in populateGuildMembers could mean another command comes in an runs this, which will crash on the 2nd acquisition of this mutex)
 	//Populate g_bookedTables g_tableMessages
 	for (int i = 1; i <= 13; i++)
 	{
@@ -277,32 +282,7 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 
 	std::string line;
 	std::ifstream bookingFile(g_bookingFile);
-	if (bookingFile.is_open())
-	{
-		//This reads each line from file, then splits into tokens delimited by ','
-		while (getline(bookingFile, line))
-		{
-			std::cout << line << '\n';
-			std::stringstream ss(line);
-			std::string token;
-			std::vector<std::string> bookingLine;
-			while (getline(ss, token, ','))
-			{
-				bookingLine.push_back(token);
-			}
-			//We might not have a system declared, so manually add one
-			if (bookingLine.size() == 3)
-			{
-				bookingLine.push_back("Other");
-			}
-			//We should now have bookingLine containing user1, user2, table, system
-			BookingInfo currentBooking(bookingLine[0], bookingLine[1], bookingLine[3]);
-			int tableNum = std::stoi(bookingLine[2]);
-			g_bookedTables->at(tableNum) = currentBooking;
-			populateGuildMembers(currentBooking, p_bot, tableNum);
-		}
-		bookingFile.close();
-	}
+	readBookingFile(p_bot, bookingFile, false);
 	g_booking_mtx.unlock();
 	co_return;
 }
@@ -689,9 +669,10 @@ int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 	return 0;
 }
 
-int listFile(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
+std::string listFile(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 {
-	return 0;
+	std::ifstream bookingFile(g_bookingFile);
+	return readBookingFile(p_bot, bookingFile, true);
 }
 
 int main()
@@ -769,7 +750,7 @@ int main()
 		}
 		else if (cmdValue == "list")
 		{
-			updateMsg = ((rc = listFile(bot, event)) != 0) ? formatError(rc) : "Booking file contents listed";
+			updateMsg = listFile(bot, event);
 		}
 		
 		event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));
