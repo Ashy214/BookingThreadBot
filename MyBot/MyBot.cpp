@@ -8,9 +8,9 @@
 #include <chrono>
 #include "date.h"
 
-dpp::snowflake GUILD_ID = 635182631754924032;
-dpp::snowflake CATEGORY_ID = 635182631754924033;
-dpp::snowflake g_admin_chan_id = 635182631754924034;
+dpp::snowflake GUILD_ID;
+dpp::snowflake CATEGORY_ID;
+dpp::snowflake g_admin_chan_id;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
@@ -35,6 +35,11 @@ std::string g_botInfo = "botInfo.txt";
 
 //ToDo:
 //	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
+//  Move archived threads to archive channel rather than deleting
+//	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
+
+//Done:
+
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 {
@@ -168,9 +173,10 @@ std::vector<std::string> getBotInfo(std::string p_file)
 dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
 {
 	//Now read through message history to get all bookings the bot has made, so the /remove command can work
+	//There seems to be a bug that this throws an Error: 50001: Missing Access if the channel we're reading from is empty...
 	dpp::confirmation_callback_t confirmation = co_await p_bot.co_messages_get(g_channel_id, 0, 0, 0, 100);
 	if (confirmation.is_error()) { /* catching an error to log it */
-		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+		p_bot.log(dpp::loglevel::ll_warning, confirmation.get_error().message);
 		co_return;
 	}
 
@@ -200,6 +206,45 @@ dpp::task<void> setupMessageHistory(dpp::cluster& p_bot)
 	g_cache_mtx.unlock();
 	co_return;
 }
+
+void readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool p_list)
+{
+	std::string line;
+	if (p_bookFile.is_open())
+	{
+		//This reads each line from file, then splits into tokens delimited by ','
+		while (getline(p_bookFile, line))
+		{
+			std::cout << line << '\n';
+			std::stringstream ss(line);
+			std::string token;
+			std::vector<std::string> bookingLine;
+			while (getline(ss, token, ','))
+			{
+				bookingLine.push_back(token);
+			}
+			//We might not have a system declared, so manually add one
+			if (bookingLine.size() == 3)
+			{
+				bookingLine.push_back("Other");
+			}
+			//We should now have bookingLine containing user1, user2, table, system
+			BookingInfo currentBooking(bookingLine[0], bookingLine[1], bookingLine[3]);
+			int tableNum = std::stoi(bookingLine[2]);
+			if (p_list)
+			{
+				//Build up msg to output to user
+			}
+			else
+			{
+				g_bookedTables->at(tableNum) = currentBooking;
+				populateGuildMembers(currentBooking, p_bot, tableNum);
+			}
+		}
+		p_bookFile.close();
+	}
+}
+
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
@@ -220,7 +265,6 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 	GUILD_ID = botInfo[0];
 	CATEGORY_ID = botInfo[1];
 	g_admin_chan_id = botInfo[2];
-
 	g_bookedTables->clear();
 	BookingInfo emptyBooking;
 	g_booking_mtx.lock();
@@ -300,7 +344,8 @@ int setupCommands(dpp::cluster &p_bot)
 														//{"help",	"Info on booking usage"} ,
 														{"update",	"Update commands"} ,
 														{"channel", "Create a new booking channel"} ,
-														{"auto",    "Set auto booking thread creation"} };
+														{"auto",    "Set auto booking thread creation"} ,
+														{"list",    "List current bookings"} };
 	std::vector<dpp::slashcommand> commands;
 	auto botId = p_bot.me.id;
 	p_bot.guild_bulk_command_delete(GUILD_ID);
@@ -376,6 +421,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	std::string system = std::get<std::string>(event.get_parameter("system"));
 	dpp::user creator = event.command.get_issuing_user();
 	int tableNum = static_cast<int>(std::get<int64_t>(event.get_parameter("table")));
+	p_bot.log(dpp::loglevel::ll_info, "Options: " + user1 + "," + user2 + "," + system + "," + std::to_string(tableNum));
 	//dpp::snowflake userId = std::get<dpp::snowflake>(event.get_parameter("userdiscord1"));
 	//Parameter checking for errors
 	//dpp::guild_member resolved_member = event.command.get_resolved_member(userId);
@@ -395,7 +441,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	
 	//Now create bookingInfo object from above parms
 	BookingInfo bookInfo(user1, user2, system, creator);
-	g_booking_mtx.lock();
+	//g_booking_mtx.lock();
 	int rc = bookTable(bookInfo, tableNum);
 	if(rc == 0
 	|| rc == -5)
@@ -407,7 +453,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 		dpp::message msg(g_channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
 		p_bot.message_create(msg);
 	}
-	g_booking_mtx.unlock();
+	//g_booking_mtx.unlock();
 	co_return rc;
 }
 
@@ -451,11 +497,17 @@ dpp::task<int> removeBooking(dpp::cluster& p_bot, const dpp::slashcommand_t& eve
 			dpp::message* msg = g_message_cache.find(g_tableMessages->at(tableNum));
 			if (msg != nullptr)
 			{
-				dpp::confirmation_callback_t confirmation = co_await p_bot.co_message_delete(msg->id, msg->channel_id);
+				//dpp::confirmation_callback_t confirmation = co_await p_bot.co_message_delete(msg->id, msg->channel_id);
+				msg->content = "Booking removed by: " + creator.global_name;
+				dpp::confirmation_callback_t confirmation = co_await p_bot.co_message_edit(*msg);
 				if (confirmation.is_error()) { /* catching an error to log it */
 					p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-					g_cache_mtx.unlock();
-					co_return -12;
+					//If it's an unknown message, it means someone manually deleted before /remove was run. Continue as normal to remove from cache
+					if (confirmation.get_error().message != "Unknown Message")
+					{
+						g_cache_mtx.unlock();
+						co_return -12;
+					}
 				}
 				g_message_cache.remove(msg);
 				g_cache_mtx.unlock();
@@ -504,7 +556,7 @@ std::string formatError(int p_rc)
 		case -11:
 			return "Error accessing botInfo file";
 		case -12:
-			return "Error deleting msg from channel";
+			return "Error editing msg in channel";
 		case -13:
 			return "Error in checking if channel already exists";
 		case -14:
@@ -584,14 +636,15 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	}
 	bookingChannel = confirmation.get<dpp::channel>(); //Get the newly created channel object
 
-	if (foundChannel)
-	{
-		confirmation = co_await p_bot.co_channel_delete(g_channel_id);
-		if (confirmation.is_error()) { /* catching an error to log it */
-			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-			co_return -10;
-		}
-	}
+	//Removed as we should be archiving the channel, not deleting
+	//if (foundChannel)
+	//{
+	//	confirmation = co_await p_bot.co_channel_delete(g_channel_id);
+	//	if (confirmation.is_error()) { /* catching an error to log it */
+	//		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+	//		co_return -10;
+	//	}
+	//}
 	//Potential for a clash without having a mutex on this but extremely unlikely to ever happen (Only if auto thread and manual creation happen at same time)
 	g_bookingFile = "SWATBookings-" + strDate  + "-" + bookingChannel.id.str();
 	g_channel_id = bookingChannel.id;
@@ -636,6 +689,11 @@ int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 	return 0;
 }
 
+int listFile(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
+{
+	return 0;
+}
+
 int main()
 {
 	std::cout << "hello";
@@ -673,6 +731,11 @@ int main()
 		std::string updateMsg;
 		int rc = 0;
 		co_await thinking;
+
+		//Logging of command here
+		dpp::user creator = event.command.get_issuing_user();
+		bot.log(dpp::loglevel::ll_info, "user: " + creator.username + ". Command: " + cmdValue);
+		
 		if (event.command.channel_id != g_channel_id && event.command.channel_id != g_admin_chan_id)
 		{
 			updateMsg = "Commands cannot be run in this channel";
@@ -703,6 +766,10 @@ int main()
 		else if (cmdValue == "auto")
 		{
 			updateMsg = ((rc = autoThread(bot, event)) != 0) ? formatError(rc) : "Auto creation set to " + g_auto;
+		}
+		else if (cmdValue == "list")
+		{
+			updateMsg = ((rc = listFile(bot, event)) != 0) ? formatError(rc) : "Booking file contents listed";
 		}
 		
 		event.edit_original_response(dpp::message(updateMsg).set_flags(dpp::m_ephemeral));

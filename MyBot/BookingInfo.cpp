@@ -127,7 +127,7 @@ std::string BookingInfo::formatMsg(int p_tableNum)
     std::string creator;
     if(&_creator != nullptr)
     {
-        msg.append("\n Booked by: " + _creator.username);
+        msg.append("\n Booked by: " + _creator.global_name);
     }
     
     return msg;
