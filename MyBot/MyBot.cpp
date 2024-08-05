@@ -11,6 +11,7 @@
 dpp::snowflake GUILD_ID;
 dpp::snowflake CATEGORY_ID;
 dpp::snowflake g_admin_chan_id;
+dpp::snowflake g_archive_cat;
 std::shared_ptr<std::map<int, BookingInfo>> g_bookedTables = std::make_shared<std::map<int, BookingInfo>>();
 std::shared_ptr<std::map<int, dpp::snowflake>> g_tableMessages = std::make_shared<std::map<int, dpp::snowflake>>();
 dpp::cache<dpp::message> g_message_cache;
@@ -35,11 +36,11 @@ std::string g_botInfo = "botInfo.txt";
 
 //ToDo:
 //	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
-//  Move archived threads to archive channel rather than deleting
-//  Function to list current booking file
 //	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
 
 //Done:
+// Bug in populateGuildMembers on readBookingFile wasn't updating the global booking objects, so when we tried to remove booking after a restart we had no idea if user was the one who made booking or not. Shifted populateGuildMembers to new function run after we setup tables. I suspect it's an issue with coroutines
+// When creating a new channel, we now move it to the archive category instead of deleting. This is a short-term solution as categories have limits on number of channels. 
 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -55,38 +56,38 @@ void handle_eptr(std::exception_ptr eptr) // passing by value is ok
 	}
 }
 
-dpp::task<void> populateGuildMembers(BookingInfo p_bookInfo, dpp::cluster &p_bot, int p_tableNum)
+dpp::task<void> populateGuildMembers(BookingInfo *p_bookInfo, dpp::cluster &p_bot, int p_tableNum)
 {
 	dpp::confirmation_callback_t confirmation;
 	dpp::guild_member_map guildMap;
 
-	if (!p_bookInfo.getUser1String().empty())
+	if (!p_bookInfo->getUser1String().empty())
 	{
-		confirmation = co_await p_bot.co_guild_search_members(GUILD_ID, p_bookInfo.getUser1String(), 1);
+		confirmation = co_await p_bot.co_guild_search_members(GUILD_ID, p_bookInfo->getUser1String(), 1);
 
 		if (confirmation.is_error()) { /* catching an error to log it */
 			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-			co_return;
+			//Don't co_return here as we still need to check for user2
 		}
-		guildMap = confirmation.get<dpp::guild_member_map>();
-
-		//Use bookInfo object from global var as the one passed into coroutine may have changed state by the time we return
-		if (!guildMap.empty())
+		else
 		{
-			g_bookedTables->at(p_tableNum).set_user1Member(guildMap.begin()->second);
-		}
-		//printf("callback1 done");
-	}
-	if (!p_bookInfo.getUser2String().empty())
-	{
-		confirmation = co_await p_bot.co_guild_search_members(GUILD_ID, p_bookInfo.getUser2String(), 1);
+			guildMap = confirmation.get<dpp::guild_member_map>();
 
+			//Use bookInfo object from global var as the one passed into coroutine may have changed state by the time we return
+			if (!guildMap.empty())
+			{
+				g_bookedTables->at(p_tableNum).set_user1Member(guildMap.begin()->second);
+			}
+		}
+	}
+	if (!p_bookInfo->getUser2String().empty())
+	{
+		confirmation = co_await p_bot.co_guild_search_members(GUILD_ID, p_bookInfo->getUser2String(), 1);
 		if (confirmation.is_error()) { /* catching an error to log it */
 			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
 			co_return;
 		}
 		guildMap = confirmation.get<dpp::guild_member_map>();
-
 		//Use bookInfo object from global var as the one passed into coroutine may have changed state by the time we return
 		if (!guildMap.empty())
 		{
@@ -242,7 +243,7 @@ std::string readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool
 			else
 			{
 				g_bookedTables->at(tableNum) = currentBooking;
-				populateGuildMembers(currentBooking, p_bot, tableNum);
+				//populateGuildMembers(&g_bookedTables->at(tableNum), p_bot, tableNum);
 			}
 		}
 		p_bookFile.close();
@@ -270,6 +271,7 @@ dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 	GUILD_ID = botInfo[0];
 	CATEGORY_ID = botInfo[1];
 	g_admin_chan_id = botInfo[2];
+	g_archive_cat = botInfo[3];
 	g_bookedTables->clear();
 	BookingInfo emptyBooking;
 	g_booking_mtx.lock(); //May need to remove this if we ever have a case where this function could be run in quick succession (The coawait in populateGuildMembers could mean another command comes in an runs this, which will crash on the 2nd acquisition of this mutex)
@@ -427,7 +429,7 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 	|| rc == -5)
 	{
 		//Booking success so format then output booking message
-		co_await populateGuildMembers(bookInfo, p_bot, tableNum);
+		co_await populateGuildMembers(&bookInfo, p_bot, tableNum);
 		
 		//Use g_bookedTables from here onwards as bookInfo was just for checking booking/passing through data
 		dpp::message msg(g_channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
@@ -582,10 +584,11 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	}
 	std::string newChannelName = "table-booking-" + strDate;
 	bool foundChannel = false;
+	dpp::channel currentChannel;
 	//Now check we don't already have a booking thread for this week (If strDate is the same as the booking thread name it means we must not have passed next tuesday, as strDate always works out next available one)
 	dpp::confirmation_callback_t confirmation = co_await p_bot.co_channel_get(g_channel_id);
 	if (!confirmation.is_error()) { //If no error, means channel exists so we need to check if it's the current weekly thread or not
-		dpp::channel currentChannel = confirmation.get<dpp::channel>();
+		currentChannel = confirmation.get<dpp::channel>();
 		foundChannel = true;
 		if (currentChannel.name == newChannelName)
 		{
@@ -605,7 +608,7 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	//First dump current bookingInfo out to file
 	dumpTableBookings();
 
-	//Now create new channel and delete old
+	//Now create new channel and archive old
 	bookingChannel.set_name(newChannelName);
 	bookingChannel.set_guild_id(GUILD_ID);
 	bookingChannel.set_parent_id(CATEGORY_ID);
@@ -616,15 +619,17 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	}
 	bookingChannel = confirmation.get<dpp::channel>(); //Get the newly created channel object
 
-	//Removed as we should be archiving the channel, not deleting
-	//if (foundChannel)
-	//{
-	//	confirmation = co_await p_bot.co_channel_delete(g_channel_id);
-	//	if (confirmation.is_error()) { /* catching an error to log it */
-	//		p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
-	//		co_return -10;
-	//	}
-	//}
+	//Now archive the channel
+	if (foundChannel)
+	{
+		//No need to check if currentChannel is null as we will only have set foundChannel if we have a current one
+		currentChannel.set_parent_id(g_archive_cat);
+		confirmation = co_await p_bot.co_channel_edit(currentChannel);
+		if (confirmation.is_error()) { /* catching an error to log it */
+			p_bot.log(dpp::loglevel::ll_error, confirmation.get_error().message);
+			co_return -10;
+		}
+	}
 	//Potential for a clash without having a mutex on this but extremely unlikely to ever happen (Only if auto thread and manual creation happen at same time)
 	g_bookingFile = "SWATBookings-" + strDate  + "-" + bookingChannel.id.str();
 	g_channel_id = bookingChannel.id;
@@ -675,6 +680,14 @@ std::string listFile(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 	return readBookingFile(p_bot, bookingFile, true);
 }
 
+dpp::task<void> setupMembers(dpp::cluster& p_bot)
+{
+	for (int i = 1; i <= 13; i++)
+	{
+		co_await populateGuildMembers(&g_bookedTables->at(i), p_bot, i);
+	}
+}
+
 int main()
 {
 	std::cout << "hello";
@@ -699,6 +712,7 @@ int main()
 				printf("Error setting up initial commands");
 			}
 			co_await setupBookedTables(bot);
+			co_await setupMembers(bot);
 			co_await setupMessageHistory(bot);
 			co_return;
 		}
