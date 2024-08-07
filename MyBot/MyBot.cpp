@@ -39,8 +39,7 @@ std::string g_botInfo = "botInfo.txt";
 //	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
 
 //Done:
-// Bug in populateGuildMembers on readBookingFile wasn't updating the global booking objects, so when we tried to remove booking after a restart we had no idea if user was the one who made booking or not. Shifted populateGuildMembers to new function run after we setup tables. I suspect it's an issue with coroutines
-// When creating a new channel, we now move it to the archive category instead of deleting. This is a short-term solution as categories have limits on number of channels. 
+// We now calculate a delay to the next 12pm Wednesday cutoff (Currently coded as tuesday for testing purposes) and set a timer on the bot to run the newChannel command to auto post the thread. This needs some more testing and tweaking to then reset the timer once we do the first post
 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -360,7 +359,7 @@ int setupCommands(dpp::cluster &p_bot)
 		}
 		else if (it.first == "channel")
 		{
-			newCommand.add_option(dpp::command_option(dpp::co_string, "date", "date in format DD-MM-YYYY", false));
+			newCommand.add_option(dpp::command_option(dpp::co_string, "table", "Tables to book delimited by spaces", false));
 		}
 		//No options for help or update
 		commands.push_back(newCommand);
@@ -443,8 +442,11 @@ dpp::task<int> bookTable(dpp::cluster &p_bot, const dpp::slashcommand_t &event)
 bool hasPerms(const dpp::slashcommand_t& event, dpp::user &p_user, BookingInfo *p_bookInfo)
 {
 	dpp::permission perms = event.command.get_resolved_permission(p_user.id);
+	dpp::user user1 = event.command.get_issuing_user();
+	
 	if (p_bookInfo->isOwner(p_user)
-	|| perms.has(dpp::p_administrator))
+	|| perms.has(dpp::p_administrator)
+	|| perms.has(dpp::p_manage_channels))
 	{
 		return true;
 	}
@@ -543,6 +545,8 @@ std::string formatError(int p_rc)
 			return "Error in checking if channel already exists";
 		case -14:
 			return "Channel already exists for this week";
+		case -15:
+			return "Error calculating dates for auto posting. Contact @Windsurfer to investigate";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
@@ -564,24 +568,15 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	std::string strDate;
 	//There is NO date-picker or 'date' data type that Discord can enforce from the slash command, so we are relying on the user providing the correct input in date format
 	//For that reason, we will ONLY accept a date of DD-MM-YYYY to make it easier to parse. If it's wrong we simply reject and don't execute this command
-	dpp::command_interaction cmd_data = p_event.command.get_command_interaction();
-	if (!cmd_data.options.empty())
-	{
-		strDate = std::get<std::string>(p_event.get_parameter("date"));
-		//For now we don't need this, but in future we will need to calculate days before this date for when to post the thread automatically
-		//std::istringstream ss(strDate);
-		//std::chrono::system_clock::time_point tp;
-		//ss >> date::parse("%d-%m-%Y", tp);
-	}
-	else
-	{
-		//Always want to get the next tuesday
-		auto todays_date = date::floor<date::days>(std::chrono::system_clock::now());
-		auto nextTuesday = todays_date + date::days{ 7 } -
-			(date::weekday{ todays_date } - date::Tuesday);
-		//std::cout << nextTuesday << '\n';
-		strDate = date::format("%d-%m-%Y", nextTuesday);
-	}
+	
+
+	//Always want to get the next tuesday
+	auto todays_date = date::floor<date::days>(std::chrono::system_clock::now());
+	auto nextTuesday = todays_date + date::days{ 7 } -
+		(date::weekday{ todays_date } - date::Tuesday);
+	//std::cout << nextTuesday << '\n';
+	strDate = date::format("%d-%m-%Y", nextTuesday);
+	
 	std::string newChannelName = "table-booking-" + strDate;
 	bool foundChannel = false;
 	dpp::channel currentChannel;
@@ -640,38 +635,101 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	//Now set ourselves back to a 'clean' state with no bookings
 	setupBookedTables(p_bot);
 	clearMsgCache();
+
+	//Now check if we had any additional parameters for pre-booking tables
+	dpp::command_interaction cmd_data = p_event.command.get_command_interaction();
+	if (!cmd_data.options.empty())
+	{
+		//Now create bookingInfo object from above parms
+		std::string user1 = "Player 1";
+		std::string user2 = "Player 2";
+		std::string event = "Event";
+		BookingInfo bookInfo(user1, user2, event, creator);
+		//g_booking_mtx.lock();
+		//Should add some error checking to ensure the values entered are numbers
+		std::string tableStr = std::get<std::string>(p_event.get_parameter("table"));
+		int tableNum = std::stoi(tableStr);
+		int rc = bookTable(bookInfo, tableNum);
+		if (rc == 0
+			|| rc == -5)
+		{
+			//Booking success so format then output booking message
+			co_await populateGuildMembers(&bookInfo, p_bot, tableNum);
+
+			//Use g_bookedTables from here onwards as bookInfo was just for checking booking/passing through data
+			dpp::message msg(g_channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
+			p_bot.message_create(msg);
+		}
+		
+	}
 	co_return 0;
 }
 
-//Can't create an overloaded newChannel function as that doesn't seem to work with threads
-int newChannelDelay(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event, time_t p_timer)
+dpp::task<int> newChanAwait(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 {
-	//Now check here that g_auto is still set. If not, we have been disabled so should just exit thread. What if we have disabled/enabled again, we fire both threads?
-	if (g_auto)
-	{
-		newChannel(p_bot, p_event);
-	}
-	return 0;
+	co_return co_await newChannel(p_bot, p_event);
 }
 
-int autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
+dpp::task<int> autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 {
 	//This could work by doing condition variables: https://en.cppreference.com/w/cpp/thread/condition_variable
 	//Kick off thread. Work out how long it needs to sleep before posting, then wait on condition variable that says to kill thread. If woken up, check if kill or not and if not then post thread. Issue with spurious wakeups?
 	//Maybe just a sep thread constantly running - checks time every 30m. If auto off then exit thread, otherwise check and sleep. If on the right day then just post
+
+	//Correct way to do this is probably with timers
+	//Flip auto flag on/off
 	g_auto = !g_auto;
 	if (g_auto)
 	{
-		//Means it was false -> true so start a newChannel function with a delay to post 6 days before if possible, otherwise immediately
-		//Do some calculations for a delay here and pass it to newChannelDelay function
-		time_t delay = 5; //Hard-coded delay for now
-		p_bot.log(dpp::loglevel::ll_error, "delay is: " + delay);
+		//Means it was false -> true so start a newChannel function with a delay
+		//First calculate delay required to post on Wed midday
+
+		//Check if it's currently wednesday < midday, otherwise get next wednesday
+		time_t delay = 0;
+		auto currentTp = std::chrono::system_clock::now();
+		auto todays_date = date::floor<date::days>(currentTp);
+		date::hh_mm_ss hms{ currentTp - todays_date };
+		if (todays_date == date::Tuesday) //Should be wednesday but use this for testing purposes
+		{
+			date::sys_time<std::chrono::seconds> sysCurrent(hms.hours() + hms.minutes()  + hms.seconds());
+			date::sys_time<std::chrono::seconds> sysNext(std::chrono::hours(14));
+			//If it's tuesday and we're before the 12pm cutoff for posting, then set the delay
+			if (sysCurrent < sysNext)
+			{				
+				auto diff = sysNext - sysCurrent;
+				date::sys_time<std::chrono::seconds> tp{ diff };
+				//Work out difference in seconds for the delay until midday
+				delay = std::chrono::system_clock::to_time_t(tp);
+			}
+		}
+		//Only do this if we havn't set the delay above, as we need to calculate the difference between now and the next Wednesday 12pm
+		if(delay == 0)
+		{
+			auto nextTue = todays_date + date::days{ 7 } -
+				(date::weekday{ todays_date } - date::Tuesday);
+			date::sys_time<std::chrono::seconds> sysCurrent(todays_date + hms.hours() + hms.minutes() + hms.seconds());
+			date::sys_time<std::chrono::seconds> sysNext(nextTue + std::chrono::hours(12));
+			if (sysNext < sysCurrent)
+			{
+				p_bot.log(dpp::loglevel::ll_error, "Calculated next date is < current date");
+				co_return -15;
+			}
+			auto diff = sysNext - sysCurrent;
+			date::sys_time<std::chrono::seconds> tp{ diff };
+			delay = std::chrono::system_clock::to_time_t(tp);
+		}
+		
+		//This is a little weird. newChannel MUST be co-await'ed, but you can't co_await in a lambda func, so calling newChanAwait as a stop-gap which simply does the co_await
+		dpp::timer timer = p_bot.start_timer([&p_bot, p_event](const dpp::timer& timer) {
+			newChanAwait(p_bot, p_event);
+			p_bot.stop_timer(timer);
+			}, delay);
 
 		//Do some additional checks here to see if there is already a thread running. If there is we shouldn't start another one!
-		std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
+		//std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
 		
 	}
-	return 0;
+	co_return 0;
 }
 
 std::string listFile(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
@@ -760,7 +818,7 @@ int main()
 		}
 		else if (cmdValue == "auto")
 		{
-			updateMsg = ((rc = autoThread(bot, event)) != 0) ? formatError(rc) : "Auto creation set to " + g_auto;
+			updateMsg = ((rc = co_await autoThread(bot, event)) != 0) ? formatError(rc) : "Auto creation set to " + g_auto;
 		}
 		else if (cmdValue == "list")
 		{

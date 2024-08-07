@@ -446,7 +446,8 @@ public:
 	async() noexcept;
 
 	/**
-	 * @brief Destructor. If any callback is pending it will be aborted.
+	 * @brief Destructor. If any 
+	 is pending it will be aborted.
 	 */
 	~async();
 
