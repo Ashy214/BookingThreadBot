@@ -33,13 +33,15 @@ std::string g_botInfo = "botInfo.txt";
 // Work on automatic posting of booking thread each week, or allow a date to be set? Perhaps kick off a new thread that rusn the newchannel function but with an optional delay as a parm to fire it off when needed?
 // Looking for game system. /LFG to sign up for a system, or to see whos LFG for a specific system. Can 'apply' to play a game and have user accept it etc.
 // Some way of checking in people on the night. Check for an reaction on the booking msg and can fill out whatever committee uses to see who's paid the night etc. 
+// Change /book command to accept multiple table numbers, like the /channel command now does
 
 //ToDo:
 //	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
 //	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
 
 //Done:
-// We now calculate a delay to the next 12pm Wednesday cutoff (Currently coded as tuesday for testing purposes) and set a timer on the bot to run the newChannel command to auto post the thread. This needs some more testing and tweaking to then reset the timer once we do the first post
+// Major bug in that we weren't reading the GUILD_ID now we've moved it to the chanids file before we register the commands. This meant any updates to the existing / commands were not being registered with the server
+// Finished implementation of /channel such that it allows a string of numbers delimited by a space to pre-book multiple tables at once
 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -253,24 +255,6 @@ std::string readBookingFile(dpp::cluster &p_bot, std::ifstream &p_bookFile, bool
 //This should only really be called on startup. We then maintain g_bookedTables as an up-to-date list of bookings
 dpp::task<void> setupBookedTables(dpp::cluster &p_bot)
 {
-	std::vector<std::string> botInfo = getBotInfo(g_botInfo);
-	if (botInfo.size() == 0)
-	{
-		p_bot.log(dpp::loglevel::ll_error, "Error reading botInfo file");
-	}
-	g_bookingFile = botInfo[0];
-	g_channel_id = botInfo[1];
-	
-	//This are constant IDs that never change, but having them stored in a file makes it easier to have the bot running on multiple machines for testing purposes
-	botInfo = getBotInfo("chanids.txt");
-	if (botInfo.size() == 0)
-	{
-		p_bot.log(dpp::loglevel::ll_error, "Error reading chanids file");
-	}
-	GUILD_ID = botInfo[0];
-	CATEGORY_ID = botInfo[1];
-	g_admin_chan_id = botInfo[2];
-	g_archive_cat = botInfo[3];
 	g_bookedTables->clear();
 	BookingInfo emptyBooking;
 	g_booking_mtx.lock(); //May need to remove this if we ever have a case where this function could be run in quick succession (The coawait in populateGuildMembers could mean another command comes in an runs this, which will crash on the 2nd acquisition of this mutex)
@@ -329,6 +313,26 @@ int setupCommands(dpp::cluster &p_bot)
 														{"list",    "List current bookings"} };
 	std::vector<dpp::slashcommand> commands;
 	auto botId = p_bot.me.id;
+
+	std::vector<std::string> botInfo = getBotInfo(g_botInfo);
+	if (botInfo.size() == 0)
+	{
+		p_bot.log(dpp::loglevel::ll_error, "Error reading botInfo file");
+	}
+	g_bookingFile = botInfo[0];
+	g_channel_id = botInfo[1];
+
+	//This are constant IDs that never change, but having them stored in a file makes it easier to have the bot running on multiple machines for testing purposes
+	botInfo = getBotInfo("chanids.txt");
+	if (botInfo.size() == 0)
+	{
+		p_bot.log(dpp::loglevel::ll_error, "Error reading chanids file");
+	}
+	GUILD_ID = botInfo[0];
+	CATEGORY_ID = botInfo[1];
+	g_admin_chan_id = botInfo[2];
+	g_archive_cat = botInfo[3];
+
 	p_bot.guild_bulk_command_delete(GUILD_ID);
 	for (auto const &it : listCommands)
 	{
@@ -647,20 +651,31 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		BookingInfo bookInfo(user1, user2, event, creator);
 		//g_booking_mtx.lock();
 		//Should add some error checking to ensure the values entered are numbers
-		std::string tableStr = std::get<std::string>(p_event.get_parameter("table"));
-		int tableNum = std::stoi(tableStr);
-		int rc = bookTable(bookInfo, tableNum);
-		if (rc == 0
-			|| rc == -5)
+		std::istringstream tableSS(std::get<std::string>(p_event.get_parameter("table")));
+		std::string tableStr;
+		//Parse through separating numbers by spaces
+		while (std::getline(tableSS, tableStr, ' '))
 		{
-			//Booking success so format then output booking message
-			co_await populateGuildMembers(&bookInfo, p_bot, tableNum);
+			int tableNum = std::stoi(tableStr);
+			if (tableNum >= 1 && tableNum <= 13)
+			{
+				int rc = bookTable(bookInfo, tableNum);
+				if(rc == 0
+				|| rc == -5)
+				{
+					//Booking success so format then output booking message
+					co_await populateGuildMembers(&bookInfo, p_bot, tableNum);
 
-			//Use g_bookedTables from here onwards as bookInfo was just for checking booking/passing through data
-			dpp::message msg(g_channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
-			p_bot.message_create(msg);
-		}
-		
+					//Use g_bookedTables from here onwards as bookInfo was just for checking booking/passing through data
+					dpp::message msg(g_channel_id, g_bookedTables->at(tableNum).formatMsg(tableNum));
+					p_bot.message_create(msg);
+				}
+				else
+				{
+					p_bot.log(dpp::loglevel::ll_error, "Prebooking rc is: " + rc);
+				}
+			}
+		}		
 	}
 	co_return 0;
 }
