@@ -121,13 +121,15 @@ std::string BookingInfo::formatMsg(int p_tableNum)
     {
         printf("user2 null");
     }
-    std::string msg = user1 + " vs " + user2 + "\n"
+    std::string msg = "------------------------------\n"
+                      + user1 + " vs " + user2 + "\n"
                       + "Table " + std::to_string(p_tableNum) + "\n"
                       + _system;
+                      
     std::string creator;
     if(&_creator != nullptr)
     {
-        msg.append("\n Booked by: " + _creator.global_name);
+        msg.append("\n Booked by: " + _creator.global_name + "\n------------------------------");
     }
     
     return msg;
