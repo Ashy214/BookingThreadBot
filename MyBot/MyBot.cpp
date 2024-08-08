@@ -563,7 +563,8 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	//First off we need to check if user is an admin, otherwise immediately return
 	dpp::user creator = p_event.command.get_issuing_user();
 	dpp::permission perms = p_event.command.get_resolved_permission(creator.id);
-	if (!perms.has(dpp::p_administrator))
+	if (!perms.has(dpp::p_administrator)
+	|| perms.has(dpp::p_manage_channels))
 	{
 		co_return -8;
 	}
