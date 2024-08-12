@@ -21,6 +21,7 @@ static std::mutex g_booking_mtx;
 bool g_auto = false;
 std::string g_bookingFile;
 std::string g_botInfo = "botInfo.txt";
+dpp::timer g_threadTimer;
 
 //Future features:
 // List tables just for that specific game system
@@ -38,10 +39,11 @@ std::string g_botInfo = "botInfo.txt";
 //ToDo:
 //	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
 //	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
+//  Button for booking and checking in
 
 //Done:
-// Major bug in that we weren't reading the GUILD_ID now we've moved it to the chanids file before we register the commands. This meant any updates to the existing / commands were not being registered with the server
-// Finished implementation of /channel such that it allows a string of numbers delimited by a space to pre-book multiple tables at once
+// Bug when checking p_manage_channels permission in that is needed to be inverted
+// Finished implementation of auto. This will run an initial timer to the next Wednesday 12pm, and afterwards set a fixed timer of 604800s (1 week in seconds) that reoccurs until /auto is run again
 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -549,8 +551,6 @@ std::string formatError(int p_rc)
 			return "Error in checking if channel already exists";
 		case -14:
 			return "Channel already exists for this week";
-		case -15:
-			return "Error calculating dates for auto posting. Contact @Windsurfer to investigate";
 		default:
 			return "Error running command. Please contact @Windsurfer. Error code: " + std::to_string(p_rc);
 	}
@@ -564,7 +564,7 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	dpp::user creator = p_event.command.get_issuing_user();
 	dpp::permission perms = p_event.command.get_resolved_permission(creator.id);
 	if (!perms.has(dpp::p_administrator)
-	|| perms.has(dpp::p_manage_channels))
+	|| !perms.has(dpp::p_manage_channels))
 	{
 		co_return -8;
 	}
@@ -686,7 +686,7 @@ dpp::task<int> newChanAwait(dpp::cluster& p_bot, const dpp::slashcommand_t& p_ev
 	co_return co_await newChannel(p_bot, p_event);
 }
 
-dpp::task<int> autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
+dpp::task<std::string> autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
 {
 	//This could work by doing condition variables: https://en.cppreference.com/w/cpp/thread/condition_variable
 	//Kick off thread. Work out how long it needs to sleep before posting, then wait on condition variable that says to kill thread. If woken up, check if kill or not and if not then post thread. Issue with spurious wakeups?
@@ -695,6 +695,7 @@ dpp::task<int> autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	//Correct way to do this is probably with timers
 	//Flip auto flag on/off
 	g_auto = !g_auto;
+	std::string returnMsg;
 	if (g_auto)
 	{
 		//Means it was false -> true so start a newChannel function with a delay
@@ -705,10 +706,10 @@ dpp::task<int> autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		auto currentTp = std::chrono::system_clock::now();
 		auto todays_date = date::floor<date::days>(currentTp);
 		date::hh_mm_ss hms{ currentTp - todays_date };
-		if (todays_date == date::Tuesday) //Should be wednesday but use this for testing purposes
+		if (todays_date == date::Wednesday) //Should be wednesday but use this for testing purposes
 		{
 			date::sys_time<std::chrono::seconds> sysCurrent(hms.hours() + hms.minutes()  + hms.seconds());
-			date::sys_time<std::chrono::seconds> sysNext(std::chrono::hours(14));
+			date::sys_time<std::chrono::seconds> sysNext(std::chrono::hours(13));
 			//If it's tuesday and we're before the 12pm cutoff for posting, then set the delay
 			if (sysCurrent < sysNext)
 			{				
@@ -722,30 +723,52 @@ dpp::task<int> autoThread(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 		if(delay == 0)
 		{
 			auto nextTue = todays_date + date::days{ 7 } -
-				(date::weekday{ todays_date } - date::Tuesday);
+				(date::weekday{ todays_date } - date::Wednesday);
 			date::sys_time<std::chrono::seconds> sysCurrent(todays_date + hms.hours() + hms.minutes() + hms.seconds());
-			date::sys_time<std::chrono::seconds> sysNext(nextTue + std::chrono::hours(12));
+			date::sys_time<std::chrono::seconds> sysNext(nextTue + std::chrono::hours(13));
 			if (sysNext < sysCurrent)
 			{
 				p_bot.log(dpp::loglevel::ll_error, "Calculated next date is < current date");
-				co_return -15;
+				co_return "Error calculating dates for auto posting. Contact @Windsurfer to investigate";
 			}
 			auto diff = sysNext - sysCurrent;
 			date::sys_time<std::chrono::seconds> tp{ diff };
+			//For testing
+			//date::sys_time<std::chrono::seconds> tp{ std::chrono::seconds(10) };
 			delay = std::chrono::system_clock::to_time_t(tp);
 		}
-		
+		//std::string s = std::vformat("{:%H%M%s}", delay);
+		//p_bot.log(dpp::loglevel::ll_info, "Delay calculated as: " + s);
 		//This is a little weird. newChannel MUST be co-await'ed, but you can't co_await in a lambda func, so calling newChanAwait as a stop-gap which simply does the co_await
 		dpp::timer timer = p_bot.start_timer([&p_bot, p_event](const dpp::timer& timer) {
 			newChanAwait(p_bot, p_event);
+			//Now find 1 week timer from the next Wednesday (NOT the next wednesday, as the timer above already does this) and start a recurring timer that doesn't end until /auto is called again
+			date::sys_time<std::chrono::seconds> timeP{ std::chrono::seconds(604800) };
+			auto newDelay = std::chrono::system_clock::to_time_t(timeP);
+			dpp::timer timerInside = p_bot.start_timer([&p_bot, p_event](const dpp::timer& timerInside) {
+				newChanAwait(p_bot, p_event);
+				}, newDelay);
+			//std::string s = std::vformat("{:%H%M%s}", newDelay);
+			//p_bot.log(dpp::loglevel::ll_info, "Inside delay calculated as: " + s);
+			//Replace g_threadTimer with reference to new timerInside, as prev timer is stopped after
+			g_threadTimer = timerInside;
 			p_bot.stop_timer(timer);
 			}, delay);
 
-		//Do some additional checks here to see if there is already a thread running. If there is we shouldn't start another one!
-		//std::thread t(newChannelDelay, std::ref(p_bot), std::ref(p_event), delay);
-		
+		//Store timer object away so if /auto is called again we can stop it
+		g_threadTimer = timer;
+		returnMsg = "Auto enabled";
 	}
-	co_return 0;
+	else
+	{
+		//Auto was already set and we are now disabling the current timer if one exists
+		if (&g_threadTimer != nullptr)
+		{
+			p_bot.stop_timer(g_threadTimer);
+		}
+		returnMsg = "Auto disabled. Thread will not post automatically";
+	}
+	co_return returnMsg;
 }
 
 std::string listFile(dpp::cluster& p_bot, const dpp::slashcommand_t& p_event)
@@ -764,7 +787,6 @@ dpp::task<void> setupMembers(dpp::cluster& p_bot)
 
 int main()
 {
-	std::cout << "hello";
 	std::string BOT_TOKEN;
 	std::ifstream tokenFile("bottoken.txt");
 	if (tokenFile.is_open())
@@ -834,7 +856,7 @@ int main()
 		}
 		else if (cmdValue == "auto")
 		{
-			updateMsg = ((rc = co_await autoThread(bot, event)) != 0) ? formatError(rc) : "Auto creation set to " + g_auto;
+			updateMsg = co_await autoThread(bot, event);
 		}
 		else if (cmdValue == "list")
 		{
