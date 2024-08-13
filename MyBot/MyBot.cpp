@@ -31,19 +31,17 @@ dpp::timer g_threadTimer;
 // Create a pinned message at top of channel showing current bookings, maybe in an image. Would need to get the message ID to edit and potentially store it in file in case bot crashes?
 // Periodically scan messages in channel to check when one has been deleted. Perhaps either on activation (When a slash command comes in)? Might be slow so maybe only on an update. Alternatively could cache ALL messages and if we find it's booked check message ID and see if msg still exists?
 // Might need some way to corroborate between bookingFile and messages in channel. Maybe a separate command to keep them in sync?
-// Work on automatic posting of booking thread each week, or allow a date to be set? Perhaps kick off a new thread that rusn the newchannel function but with an optional delay as a parm to fire it off when needed?
 // Looking for game system. /LFG to sign up for a system, or to see whos LFG for a specific system. Can 'apply' to play a game and have user accept it etc.
 // Some way of checking in people on the night. Check for an reaction on the booking msg and can fill out whatever committee uses to see who's paid the night etc. 
 // Change /book command to accept multiple table numbers, like the /channel command now does
 
 //ToDo:
-//	Update newChannel function to actually wait until the date specified to post (still post 6 days before it though). Only do this for auto I think
 //	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
 //  Button for booking and checking in
+//  Post a message in general tagging everyone when the booking thread goes live
 
 //Done:
-// Bug when checking p_manage_channels permission in that is needed to be inverted
-// Finished implementation of auto. This will run an initial timer to the next Wednesday 12pm, and afterwards set a fixed timer of 604800s (1 week in seconds) that reoccurs until /auto is run again
+
 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -678,6 +676,11 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 			}
 		}		
 	}
+
+	//Post message in general channel to notify everyone table booking is live
+	dpp::message msg(801756933844500502, "Table booking is now live @everyone. Get your games booked in either via the robot or the standard way!");
+	p_bot.message_create(msg);
+
 	co_return 0;
 }
 
@@ -895,6 +898,16 @@ int main()
 								
 		});
 
+	bot.on_channel_create([&bot](const dpp::channel_create_t& event) {
+		dpp::channel *createdChan = event.created;
+		if (createdChan->name.find("table-booking-") != std::string::npos)
+		{
+			//We've found a new channel created under table-booking so update g_channel_id
+			bot.log(dpp::loglevel::ll_info, "New channel, updating g_channel_id to: " + createdChan->id.str());
+			g_channel_id = createdChan->id;
+			dumpBotInfo();
+		}
+		});
 	//Add a handler to accept normal commands, maybe starting with ! e.g. !book <user1> <user2> <tableNum> <system>
 
 	/* Start the bot */
