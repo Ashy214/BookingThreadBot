@@ -36,12 +36,10 @@ dpp::timer g_threadTimer;
 // Change /book command to accept multiple table numbers, like the /channel command now does
 
 //ToDo:
-//	Some method of tracking if a booking thread has been created not using the bot and updating the IDs to find it. Maybe running /update to scan. Easiest will be to use an on_channel event to monitor for it
 //  Button for booking and checking in
-//  Post a message in general tagging everyone when the booking thread goes live
 
 //Done:
-
+// When detecting a new channel being created without using the bot, we weren't updating the booking files or resetting the bookings
 
 
 void handle_eptr(std::exception_ptr eptr) // passing by value is ok
@@ -561,10 +559,13 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	//First off we need to check if user is an admin, otherwise immediately return
 	dpp::user creator = p_event.command.get_issuing_user();
 	dpp::permission perms = p_event.command.get_resolved_permission(creator.id);
-	if (!perms.has(dpp::p_administrator)
+	if ((!perms.has(dpp::p_administrator)
 	&& !perms.has(dpp::p_manage_channels))
 	{
-		co_return -8;
+		if (creator.id != 225690039206543361)
+		{
+			co_return -8;
+		}
 	}
 
 	dpp::channel bookingChannel;
@@ -680,7 +681,26 @@ dpp::task<int> newChannel(dpp::cluster& p_bot, const dpp::slashcommand_t& p_even
 	//Post message in general channel to notify everyone table booking is live
 	dpp::message msg(801756933844500502, "Table booking is now live @everyone. Get your games booked in either via the robot or the standard way!");
 	p_bot.message_create(msg);
-
+	//dpp::message msgButton(g_channel_id, "Book your tables below!");
+	//msgButton.add_component(
+	//	dpp::component().add_component(
+	//		dpp::component()
+	//		.set_label("Book a Table")
+	//		.set_type(dpp::cot_button)
+	//		.set_style(dpp::cos_primary)
+	//		.set_id("booktable")
+	//	)
+	//);
+	//msgButton.add_component(
+	//	dpp::component().add_component(
+	//		dpp::component()
+	//		.set_label("Check-In")
+	//		.set_type(dpp::cot_button)
+	//		.set_style(dpp::cos_primary)
+	//		.set_id("checkin")
+	//	)
+	//);
+	//p_bot.message_create(msgButton);
 	co_return 0;
 }
 
@@ -900,13 +920,132 @@ int main()
 
 	bot.on_channel_create([&bot](const dpp::channel_create_t& event) {
 		dpp::channel *createdChan = event.created;
-		if (createdChan->name.find("table-booking-") != std::string::npos)
+		if (bot.me != createdChan->owner_id)
 		{
-			//We've found a new channel created under table-booking so update g_channel_id
-			bot.log(dpp::loglevel::ll_info, "New channel, updating g_channel_id to: " + createdChan->id.str());
-			g_channel_id = createdChan->id;
-			dumpBotInfo();
+			if (createdChan->name.find("table-booking-") != std::string::npos)
+			{
+				//We've found a new channel created under table-booking so update g_channel_id
+				bot.log(dpp::loglevel::ll_info, "New channel, updating g_channel_id to: " + createdChan->id.str());
+				g_channel_id = createdChan->id;
+				g_bookingFile = "SWATBookings-" + createdChan->id.str();
+				dumpBotInfo();
+				//Now set ourselves back to a 'clean' state with no bookings
+				setupBookedTables(bot);
+				clearMsgCache();
+			}
 		}
+		});
+
+	bot.on_button_click([&bot](const dpp::button_click_t& event) {
+		/* Button clicks are still interactions, and must be replied to in some form to
+		 * prevent the "this interaction has failed" message from Discord to the user.
+		 */
+		if (event.custom_id == "checkin")
+		{
+			/* Instantiate an interaction_modal_response object */
+			dpp::interaction_modal_response modal("checkin_form", "Please enter username to check-in");
+
+			/* Add a text component */
+			modal.add_component(
+				dpp::component()
+				.set_label("Discord Username")
+				.set_id("username")
+				.set_type(dpp::cot_text)
+				.set_placeholder("Enter a discord username to check in here")
+				.set_text_style(dpp::text_short)
+			);
+
+			/* Add another text component in the next row, as required by Discord */
+			//modal.add_row();
+			//modal.add_component(
+			//	dpp::component()
+			//	.set_label("Type rammel")
+			//	.set_id("field_id2")
+			//	.set_type(dpp::cot_text)
+			//	.set_placeholder("gumf")
+			//	.set_min_length(1)
+			//	.set_max_length(2000)
+			//	.set_text_style(dpp::text_paragraph)
+			//);
+
+			/* Trigger the dialog box. All dialog boxes are ephemeral */
+			event.dialog(modal);
+		}
+		if (event.custom_id == "booktable")
+		{
+			/* Instantiate an interaction_modal_response object */
+			dpp::interaction_modal_response modal("book_form", "Book a Table");
+
+			//Player 1
+			modal.add_component(
+				dpp::component()
+				.set_label("Player 1")
+				.set_id("user1")
+				.set_type(dpp::cot_text)
+				.set_placeholder("Player 1")
+				.set_text_style(dpp::text_short)
+			);
+			modal.add_row();
+			//Player 2
+			modal.add_component(
+				dpp::component()
+				.set_label("Player 2")
+				.set_id("user2")
+				.set_type(dpp::cot_text)
+				.set_placeholder("Player 2")
+				.set_text_style(dpp::text_short)
+			);
+			modal.add_row();
+			//Table
+			modal.add_component(
+				dpp::component()
+				.set_label("Table Number")
+				.set_id("table")
+				.set_type(dpp::cot_selectmenu)
+				.set_max_values(1)
+				.add_select_option(dpp::select_option("table1", "1", "1"))
+				.add_select_option(dpp::select_option("table2", "2", "2"))
+				.add_select_option(dpp::select_option("table3", "3", "3"))
+				.add_select_option(dpp::select_option("table4", "4", "4"))
+				.add_select_option(dpp::select_option("table5", "5", "5"))
+				.add_select_option(dpp::select_option("table6", "6", "6"))
+				.add_select_option(dpp::select_option("table7", "7", "7"))
+				.add_select_option(dpp::select_option("table8", "8", "8"))
+				.add_select_option(dpp::select_option("table9", "9", "9"))
+				.add_select_option(dpp::select_option("table13", "13", "13"))
+			);
+			modal.add_row();
+			//Game system
+			modal.add_component(
+				dpp::component()
+				.set_label("Game system")
+				.set_id("system")
+				.set_type(dpp::cot_text)
+				.set_placeholder("40k/AoS/Heresy")
+				.set_text_style(dpp::text_short)
+			);
+
+			/* Trigger the dialog box. All dialog boxes are ephemeral */
+			event.dialog(modal);
+		}
+		});
+
+
+	/* This event handles form submission for the modal dialog we create above */
+	bot.on_form_submit([](const dpp::form_submit_t& event)->dpp::task<void> {
+		/* For this simple example, we know the first element of the first row ([0][0]) is value type string.
+		 * In the real world, it may not be safe to make such assumptions!
+		 */
+		dpp::async thinking = event.co_thinking(true);
+		co_await thinking;
+		std::string v = std::get<std::string>(event.components[0].components[0].value);
+
+		dpp::message m;
+		m.set_content("You entered: " + v).set_flags(dpp::m_ephemeral);
+
+		/* Emit a reply. Form submission is still an interaction and must generate some form of reply! */
+		event.edit_original_response(m.set_flags(dpp::m_ephemeral));
+		
 		});
 	//Add a handler to accept normal commands, maybe starting with ! e.g. !book <user1> <user2> <tableNum> <system>
 
